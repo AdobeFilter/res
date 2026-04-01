@@ -1,0 +1,61 @@
+package routing
+
+import (
+	"valhalla/common/api"
+)
+
+// Edge represents a weighted connection between two nodes.
+type Edge struct {
+	From   string
+	To     string
+	Cost   float64
+}
+
+// Graph represents the mesh network topology with weighted edges.
+type Graph struct {
+	nodes    map[string]*api.NodeInfo
+	edges    map[string][]Edge
+	weights  Weights
+}
+
+// BuildGraph constructs a weighted graph from online nodes and their metrics.
+// Every pair of online nodes gets an edge. The edge cost is the average of both endpoints' costs.
+func BuildGraph(nodes []*api.NodeInfo, metrics map[string]*api.Metrics, optimizer *Optimizer) *Graph {
+	g := &Graph{
+		nodes:   make(map[string]*api.NodeInfo),
+		edges:   make(map[string][]Edge),
+		weights: optimizer.weights,
+	}
+
+	for _, n := range nodes {
+		g.nodes[n.ID] = n
+	}
+
+	// Create edges between all pairs of online nodes
+	for i, a := range nodes {
+		for j, b := range nodes {
+			if i >= j {
+				continue
+			}
+
+			costA := Cost(metrics[a.ID], g.weights)
+			costB := Cost(metrics[b.ID], g.weights)
+			avgCost := (costA + costB) / 2.0
+
+			g.edges[a.ID] = append(g.edges[a.ID], Edge{From: a.ID, To: b.ID, Cost: avgCost})
+			g.edges[b.ID] = append(g.edges[b.ID], Edge{From: b.ID, To: a.ID, Cost: avgCost})
+		}
+	}
+
+	return g
+}
+
+// Neighbors returns all edges from a given node.
+func (g *Graph) Neighbors(nodeID string) []Edge {
+	return g.edges[nodeID]
+}
+
+// NodeCount returns the number of nodes in the graph.
+func (g *Graph) NodeCount() int {
+	return len(g.nodes)
+}
