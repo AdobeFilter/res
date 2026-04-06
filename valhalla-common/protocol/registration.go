@@ -24,7 +24,12 @@ type AuthResponse struct {
 type NodeRegisterRequest struct {
 	Name      string       `json:"name"`
 	NodeType  api.NodeType `json:"node_type"`
+	OS        string       `json:"os,omitempty"`
 	PublicKey string       `json:"public_key"`
+}
+
+type NodeUpdateRequest struct {
+	Name string `json:"name"`
 }
 
 type NodeRegisterResponse struct {

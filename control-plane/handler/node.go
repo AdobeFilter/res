@@ -71,6 +71,47 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+// Update handles PUT /api/v1/nodes/{id}
+func (h *NodeHandler) Update(w http.ResponseWriter, r *http.Request) {
+	accountID := middleware.GetAccountID(r.Context())
+	nodeID := extractPathParam(r.URL.Path, "/api/v1/nodes/")
+
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "node id required")
+		return
+	}
+
+	node, err := h.nodes.GetByID(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	if node.AccountID != accountID {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	var req protocol.NodeUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	if err := h.nodes.UpdateName(r.Context(), nodeID, req.Name); err != nil {
+		h.logger.Error("update node failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to update node")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Delete handles DELETE /api/v1/nodes/{id}
 func (h *NodeHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	accountID := middleware.GetAccountID(r.Context())

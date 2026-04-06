@@ -46,6 +46,7 @@ func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req pr
 		AccountID: accountID,
 		Name:      req.Name,
 		NodeType:  req.NodeType,
+		OS:        req.OS,
 		PublicKey: req.PublicKey,
 		Status:    api.NodeStatusOnline,
 	}

@@ -79,6 +79,7 @@ func main() {
 
 	mux.Handle("POST /api/v1/nodes/register", authMw(http.HandlerFunc(nodeHandler.Register)))
 	mux.Handle("GET /api/v1/nodes", authMw(http.HandlerFunc(nodeHandler.List)))
+	mux.Handle("PUT /api/v1/nodes/{id}", authMw(http.HandlerFunc(nodeHandler.Update)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", authMw(http.HandlerFunc(nodeHandler.Delete)))
 	mux.Handle("POST /api/v1/nodes/{id}/heartbeat", authMw(http.HandlerFunc(nodeHandler.Heartbeat)))
 	mux.Handle("GET /api/v1/routes/optimal", authMw(http.HandlerFunc(routeHandler.GetOptimal)))

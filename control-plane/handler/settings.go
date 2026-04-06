@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"go.uber.org/zap"
+	"valhalla/common/api"
 	"valhalla/common/protocol"
 	"valhalla/control-plane/db"
 	"valhalla/control-plane/middleware"
@@ -52,16 +53,39 @@ func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if req.VLESSEnabled == nil {
+	if req.VLESSEnabled == nil && req.ExitNodeID == nil {
 		writeError(w, http.StatusBadRequest, "no settings to update")
 		return
 	}
 
-	settings, err := h.settings.Upsert(r.Context(), accountID, *req.VLESSEnabled)
-	if err != nil {
-		h.logger.Error("update settings failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to update settings")
-		return
+	var settings *api.AccountSettings
+	var err error
+
+	if req.ExitNodeID != nil {
+		exitID := *req.ExitNodeID
+		var exitPtr *string
+		if exitID != "" {
+			exitPtr = &exitID
+		}
+		settings, err = h.settings.SetExitNode(r.Context(), accountID, exitPtr)
+		if err != nil {
+			h.logger.Error("set exit node failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to set exit node")
+			return
+		}
+	}
+
+	if req.VLESSEnabled != nil {
+		settings, err = h.settings.Upsert(r.Context(), accountID, *req.VLESSEnabled)
+		if err != nil {
+			h.logger.Error("update settings failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to update settings")
+			return
+		}
+	}
+
+	if settings == nil {
+		settings, _ = h.settings.Get(r.Context(), accountID)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.SettingsResponse{Settings: *settings})

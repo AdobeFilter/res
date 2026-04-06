@@ -33,5 +33,6 @@ type SettingsResponse struct {
 
 // UpdateSettingsRequest updates account-level settings.
 type UpdateSettingsRequest struct {
-	VLESSEnabled *bool `json:"vless_enabled,omitempty"`
+	VLESSEnabled *bool   `json:"vless_enabled,omitempty"`
+	ExitNodeID   *string `json:"exit_node_id,omitempty"`
 }

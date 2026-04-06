@@ -17,6 +17,7 @@ type AccountRepository interface {
 type AccountSettingsRepository interface {
 	Get(ctx context.Context, accountID string) (*api.AccountSettings, error)
 	Upsert(ctx context.Context, accountID string, vlessEnabled bool) (*api.AccountSettings, error)
+	SetExitNode(ctx context.Context, accountID string, exitNodeID *string) (*api.AccountSettings, error)
 }
 
 // NodeRepository handles node persistence.
@@ -28,6 +29,7 @@ type NodeRepository interface {
 	GetAllOnline(ctx context.Context) ([]*api.NodeInfo, error)
 	UpdateEndpoint(ctx context.Context, nodeID, endpoint string, natType api.NATType) error
 	UpdateStatus(ctx context.Context, nodeID string, status api.NodeStatus) error
+	UpdateName(ctx context.Context, nodeID, name string) error
 	UpdateLastSeen(ctx context.Context, nodeID string) error
 	Delete(ctx context.Context, nodeID string) error
 }

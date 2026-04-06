@@ -55,6 +55,7 @@ type Account struct {
 type AccountSettings struct {
 	AccountID    string    `json:"account_id"`
 	VLESSEnabled bool      `json:"vless_enabled"`
+	ExitNodeID   string    `json:"exit_node_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -64,6 +65,7 @@ type NodeInfo struct {
 	AccountID  string     `json:"account_id"`
 	Name       string     `json:"name"`
 	NodeType   NodeType   `json:"node_type"`
+	OS         string     `json:"os,omitempty"`
 	PublicKey  string     `json:"public_key"`
 	Endpoint   string     `json:"endpoint,omitempty"`
 	NATType    NATType    `json:"nat_type,omitempty"`
