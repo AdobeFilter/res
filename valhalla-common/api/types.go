@@ -69,7 +69,7 @@ type NodeInfo struct {
 	NATType    NATType    `json:"nat_type,omitempty"`
 	InternalIP string     `json:"internal_ip,omitempty"`
 	Status     NodeStatus `json:"status"`
-	LastSeen   time.Time  `json:"last_seen,omitempty"`
+	LastSeen   *time.Time `json:"last_seen,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
@@ -107,12 +107,12 @@ type Route struct {
 
 // Device represents a device belonging to an account (for device list display).
 type Device struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	NodeType   NodeType   `json:"node_type"`
-	Status     NodeStatus `json:"status"`
-	InternalIP string     `json:"internal_ip"`
-	LastSeen   time.Time  `json:"last_seen"`
+	ID         string      `json:"id"`
+	Name       string      `json:"name"`
+	NodeType   NodeType    `json:"node_type"`
+	Status     NodeStatus  `json:"status"`
+	InternalIP string      `json:"internal_ip"`
+	LastSeen   *time.Time  `json:"last_seen,omitempty"`
 }
 
 // STUNServer represents a registered STUN server.

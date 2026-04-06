@@ -54,7 +54,7 @@ func (c *StaleNodeCleaner) cleanup(ctx context.Context) {
 	cutoff := time.Now().Add(-c.timeout)
 	marked := 0
 	for _, node := range nodes {
-		if !node.LastSeen.IsZero() && node.LastSeen.Before(cutoff) {
+		if node.LastSeen != nil && node.LastSeen.Before(cutoff) {
 			if err := c.nodes.UpdateStatus(ctx, node.ID, api.NodeStatusOffline); err != nil {
 				c.logger.Error("failed to mark node offline",
 					zap.String("node_id", node.ID),
