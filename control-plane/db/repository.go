@@ -48,7 +48,9 @@ type RouteRepository interface {
 
 // IPAllocator handles mesh IP allocation.
 type IPAllocator interface {
+	FindAvailable(ctx context.Context) (string, error)
 	Allocate(ctx context.Context, nodeID string) (string, error)
+	AssignIP(ctx context.Context, ip string, nodeID string) error
 	Release(ctx context.Context, nodeID string) error
 }
 

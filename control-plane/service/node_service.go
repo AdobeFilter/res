@@ -50,23 +50,21 @@ func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req pr
 		Status:    api.NodeStatusOnline,
 	}
 
-	// Allocate internal mesh IP
-	ip, err := s.ipAlloc.Allocate(ctx, "pending")
+	// Find available mesh IP
+	ip, err := s.ipAlloc.FindAvailable(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("allocate IP: %w", err)
 	}
 	node.InternalIP = ip
 
-	// Create node in DB
+	// Create node in DB (generates node.ID)
 	if err := s.nodes.Create(ctx, node); err != nil {
-		s.ipAlloc.Release(ctx, "pending")
 		return nil, fmt.Errorf("create node: %w", err)
 	}
 
-	// Update IP allocation with actual node ID
-	s.ipAlloc.Release(ctx, "pending")
-	if _, err := s.ipAlloc.Allocate(ctx, node.ID); err != nil {
-		s.logger.Warn("failed to update IP allocation", zap.Error(err))
+	// Record IP allocation with real node ID
+	if err := s.ipAlloc.AssignIP(ctx, ip, node.ID); err != nil {
+		s.logger.Warn("failed to record IP allocation", zap.Error(err))
 	}
 
 	// Get peers for this node (other online nodes in the mesh)

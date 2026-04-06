@@ -81,8 +81,7 @@ func NewIPAllocator(pool *pgxpool.Pool, meshCIDR string) IPAllocator {
 	return &pgIPAllocator{pool: pool, meshNet: meshCIDR}
 }
 
-func (a *pgIPAllocator) Allocate(ctx context.Context, nodeID string) (string, error) {
-	// Find next available IP in the mesh CIDR range
+func (a *pgIPAllocator) FindAvailable(ctx context.Context) (string, error) {
 	var ip string
 	err := a.pool.QueryRow(ctx,
 		`SELECT host(candidate)::text
@@ -100,17 +99,30 @@ func (a *pgIPAllocator) Allocate(ctx context.Context, nodeID string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("find available IP: %w", err)
 	}
+	return ip, nil
+}
 
-	_, err = a.pool.Exec(ctx,
-		`INSERT INTO ip_allocations (ip, node_id) VALUES ($1::inet, $2)
-		 ON CONFLICT (ip) DO UPDATE SET node_id=$2, allocated_at=NOW()`,
+func (a *pgIPAllocator) Allocate(ctx context.Context, nodeID string) (string, error) {
+	ip, err := a.FindAvailable(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := a.AssignIP(ctx, ip, nodeID); err != nil {
+		return "", err
+	}
+	return ip, nil
+}
+
+func (a *pgIPAllocator) AssignIP(ctx context.Context, ip string, nodeID string) error {
+	_, err := a.pool.Exec(ctx,
+		`INSERT INTO ip_allocations (ip, node_id) VALUES ($1::inet, $2::uuid)
+		 ON CONFLICT (ip) DO UPDATE SET node_id=$2::uuid, allocated_at=NOW()`,
 		ip, nodeID,
 	)
 	if err != nil {
-		return "", fmt.Errorf("allocate IP: %w", err)
+		return fmt.Errorf("assign IP: %w", err)
 	}
-
-	return ip, nil
+	return nil
 }
 
 func (a *pgIPAllocator) Release(ctx context.Context, nodeID string) error {
