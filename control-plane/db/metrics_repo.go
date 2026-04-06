@@ -88,8 +88,8 @@ func (a *pgIPAllocator) Allocate(ctx context.Context, nodeID string) (string, er
 		`WITH mesh AS (
 			SELECT host(ip)::text AS ip
 			FROM generate_series(
-				(inet $1 + 1)::inet,
-				(broadcast(inet $1) - 1)::inet,
+				($1::inet + 1)::inet,
+				(broadcast($1::inet) - 1)::inet,
 				1
 			) AS ip
 		)
