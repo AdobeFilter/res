@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -188,7 +189,7 @@ func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Generate a relay ID from address
-	relayID := req.Address + ":" + strings.Itoa(req.Port)
+	relayID := req.Address + ":" + strconv.Itoa(req.Port)
 
 	if err := h.relayRepo.Upsert(r.Context(), relayID, req.Address, req.Port, req.Capacity); err != nil {
 		h.logger.Error("register relay failed", zap.Error(err))
