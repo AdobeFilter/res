@@ -85,17 +85,12 @@ func (a *pgIPAllocator) Allocate(ctx context.Context, nodeID string) (string, er
 	// Find next available IP in the mesh CIDR range
 	var ip string
 	err := a.pool.QueryRow(ctx,
-		`WITH mesh AS (
-			SELECT host(ip)::text AS ip
-			FROM generate_series(
-				($1::inet + 1)::inet,
-				(broadcast($1::inet) - 1)::inet,
-				1
-			) AS ip
-		)
-		SELECT mesh.ip FROM mesh
-		LEFT JOIN ip_allocations ia ON ia.ip = mesh.ip::inet
-		WHERE ia.ip IS NULL
+		`SELECT host(candidate)::text
+		FROM generate_series(1, (1 << (32 - masklen($1::cidr))) - 2) AS s(off),
+		     LATERAL (SELECT ($1::inet + s.off)::inet AS candidate) sub
+		LEFT JOIN ip_allocations ia ON ia.ip = sub.candidate
+		LEFT JOIN nodes n ON n.internal_ip = sub.candidate
+		WHERE ia.ip IS NULL AND n.internal_ip IS NULL
 		LIMIT 1`,
 		a.meshNet,
 	).Scan(&ip)
