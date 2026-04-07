@@ -18,6 +18,9 @@ func NewNodeRepository(pool *pgxpool.Pool) NodeRepository {
 	return &pgNodeRepo{pool: pool}
 }
 
+const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, nat_type,
+	host(internal_ip), status, sort_order, shared_folder, last_seen, created_at`
+
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 	var internalIP *net.IP
 	if node.InternalIP != "" {
@@ -41,40 +44,25 @@ func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 
 func (r *pgNodeRepo) GetByID(ctx context.Context, id string) (*api.NodeInfo, error) {
 	var n api.NodeInfo
-	var endpoint, natType, internalIP, osStr *string
+	var osStr, endpoint, natType, intIP, sharedFolder *string
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-		        host(internal_ip), status, last_seen, created_at
-		 FROM nodes WHERE id=$1`,
-		id,
+		`SELECT `+nodeColumns+` FROM nodes WHERE id=$1`, id,
 	).Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
-		&endpoint, &natType, &internalIP, &n.Status, &n.LastSeen, &n.CreatedAt)
+		&endpoint, &natType, &intIP, &n.Status,
+		&n.SortOrder, &sharedFolder, &n.LastSeen, &n.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, api.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get node: %w", err)
 	}
-	if osStr != nil {
-		n.OS = *osStr
-	}
-	if endpoint != nil {
-		n.Endpoint = *endpoint
-	}
-	if natType != nil {
-		n.NATType = api.NATType(*natType)
-	}
-	if internalIP != nil {
-		n.InternalIP = *internalIP
-	}
+	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder)
 	return &n, nil
 }
 
 func (r *pgNodeRepo) GetByAccountID(ctx context.Context, accountID string) ([]*api.NodeInfo, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-		        host(internal_ip), status, last_seen, created_at
-		 FROM nodes WHERE account_id=$1 ORDER BY created_at`,
+		`SELECT `+nodeColumns+` FROM nodes WHERE account_id=$1 ORDER BY sort_order, created_at`,
 		accountID,
 	)
 	if err != nil {
@@ -86,9 +74,7 @@ func (r *pgNodeRepo) GetByAccountID(ctx context.Context, accountID string) ([]*a
 
 func (r *pgNodeRepo) GetOnlineByType(ctx context.Context, nodeType api.NodeType) ([]*api.NodeInfo, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-		        host(internal_ip), status, last_seen, created_at
-		 FROM nodes WHERE node_type=$1 AND status='online'`,
+		`SELECT `+nodeColumns+` FROM nodes WHERE node_type=$1 AND status='online'`,
 		nodeType,
 	)
 	if err != nil {
@@ -100,9 +86,7 @@ func (r *pgNodeRepo) GetOnlineByType(ctx context.Context, nodeType api.NodeType)
 
 func (r *pgNodeRepo) GetAllOnline(ctx context.Context) ([]*api.NodeInfo, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-		        host(internal_ip), status, last_seen, created_at
-		 FROM nodes WHERE status IN ('online', 'degraded')`,
+		`SELECT `+nodeColumns+` FROM nodes WHERE status IN ('online', 'degraded')`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query all online nodes: %w", err)
@@ -127,6 +111,30 @@ func (r *pgNodeRepo) UpdateStatus(ctx context.Context, nodeID string, status api
 	return err
 }
 
+func (r *pgNodeRepo) UpdateName(ctx context.Context, nodeID, name string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE nodes SET name=$2 WHERE id=$1`,
+		nodeID, name,
+	)
+	return err
+}
+
+func (r *pgNodeRepo) UpdateSortOrder(ctx context.Context, nodeID string, sortOrder int) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE nodes SET sort_order=$2 WHERE id=$1`,
+		nodeID, sortOrder,
+	)
+	return err
+}
+
+func (r *pgNodeRepo) UpdateSharedFolder(ctx context.Context, nodeID, folder string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE nodes SET shared_folder=$2 WHERE id=$1`,
+		nodeID, nullString(folder),
+	)
+	return err
+}
+
 func (r *pgNodeRepo) UpdateLastSeen(ctx context.Context, nodeID string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE nodes SET last_seen=NOW(), status='online' WHERE id=$1`,
@@ -140,38 +148,38 @@ func (r *pgNodeRepo) Delete(ctx context.Context, nodeID string) error {
 	return err
 }
 
+func applyScanHelper(n *api.NodeInfo, osStr, endpoint, natType, intIP, sharedFolder *string) {
+	if osStr != nil {
+		n.OS = *osStr
+	}
+	if endpoint != nil {
+		n.Endpoint = *endpoint
+	}
+	if natType != nil {
+		n.NATType = api.NATType(*natType)
+	}
+	if intIP != nil {
+		n.InternalIP = *intIP
+	}
+	if sharedFolder != nil {
+		n.SharedFolder = *sharedFolder
+	}
+}
+
 func scanNodes(rows pgx.Rows) ([]*api.NodeInfo, error) {
 	var nodes []*api.NodeInfo
 	for rows.Next() {
 		var n api.NodeInfo
-		var endpoint, natType, internalIP, osStr *string
+		var osStr, endpoint, natType, intIP, sharedFolder *string
 		if err := rows.Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
-			&endpoint, &natType, &internalIP, &n.Status, &n.LastSeen, &n.CreatedAt); err != nil {
+			&endpoint, &natType, &intIP, &n.Status,
+			&n.SortOrder, &sharedFolder, &n.LastSeen, &n.CreatedAt); err != nil {
 			return nil, err
 		}
-		if osStr != nil {
-			n.OS = *osStr
-		}
-		if endpoint != nil {
-			n.Endpoint = *endpoint
-		}
-		if natType != nil {
-			n.NATType = api.NATType(*natType)
-		}
-		if internalIP != nil {
-			n.InternalIP = *internalIP
-		}
+		applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder)
 		nodes = append(nodes, &n)
 	}
 	return nodes, rows.Err()
-}
-
-func (r *pgNodeRepo) UpdateName(ctx context.Context, nodeID, name string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE nodes SET name=$2 WHERE id=$1`,
-		nodeID, name,
-	)
-	return err
 }
 
 func nullString(s string) *string {

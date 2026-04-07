@@ -70,9 +70,11 @@ type NodeInfo struct {
 	Endpoint   string     `json:"endpoint,omitempty"`
 	NATType    NATType    `json:"nat_type,omitempty"`
 	InternalIP string     `json:"internal_ip,omitempty"`
-	Status     NodeStatus `json:"status"`
-	LastSeen   *time.Time `json:"last_seen,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	Status       NodeStatus `json:"status"`
+	SortOrder    int        `json:"sort_order"`
+	SharedFolder string     `json:"shared_folder,omitempty"`
+	LastSeen     *time.Time `json:"last_seen,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // PeerInfo is a subset of NodeInfo shared with other nodes for WireGuard configuration.

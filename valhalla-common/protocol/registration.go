@@ -29,7 +29,12 @@ type NodeRegisterRequest struct {
 }
 
 type NodeUpdateRequest struct {
-	Name string `json:"name"`
+	Name         string `json:"name,omitempty"`
+	SharedFolder string `json:"shared_folder,omitempty"`
+}
+
+type NodeReorderRequest struct {
+	NodeIDs []string `json:"node_ids"`
 }
 
 type NodeRegisterResponse struct {

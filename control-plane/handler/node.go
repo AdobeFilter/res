@@ -98,15 +98,47 @@ func (h *NodeHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+	if req.Name != "" {
+		if err := h.nodes.UpdateName(r.Context(), nodeID, req.Name); err != nil {
+			h.logger.Error("update node name failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to update node")
+			return
+		}
+	}
+
+	if req.SharedFolder != "" {
+		if err := h.nodes.UpdateSharedFolder(r.Context(), nodeID, req.SharedFolder); err != nil {
+			h.logger.Error("update shared folder failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to update node")
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Reorder handles POST /api/v1/nodes/reorder
+func (h *NodeHandler) Reorder(w http.ResponseWriter, r *http.Request) {
+	accountID := middleware.GetAccountID(r.Context())
+	if accountID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
-	if err := h.nodes.UpdateName(r.Context(), nodeID, req.Name); err != nil {
-		h.logger.Error("update node failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to update node")
+	var req protocol.NodeReorderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	for i, nodeID := range req.NodeIDs {
+		node, err := h.nodes.GetByID(r.Context(), nodeID)
+		if err != nil || node.AccountID != accountID {
+			continue
+		}
+		if err := h.nodes.UpdateSortOrder(r.Context(), nodeID, i); err != nil {
+			h.logger.Error("update sort order failed", zap.Error(err))
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
