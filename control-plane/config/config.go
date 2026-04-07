@@ -22,6 +22,10 @@ type Config struct {
 	// Mesh network
 	MeshCIDR      string // e.g. "10.100.0.0/16"
 
+	// STUN
+	STUNAddr    string
+	STUNAltAddr string
+
 	// Scheduler
 	RouteRecalcInterval    time.Duration
 	StaleNodeTimeout       time.Duration
@@ -37,6 +41,8 @@ func Load() *Config {
 		JWTSecret:               getEnv("JWT_SECRET", "change-me-in-production"),
 		TokenExpiry:             getDurationEnv("TOKEN_EXPIRY", 24*time.Hour),
 		MeshCIDR:                getEnv("MESH_CIDR", "10.100.0.0/16"),
+		STUNAddr:                getEnv("STUN_ADDR", ":3478"),
+		STUNAltAddr:             getEnv("STUN_ALT_ADDR", ":3479"),
 		RouteRecalcInterval:     getDurationEnv("ROUTE_RECALC_INTERVAL", 30*time.Second),
 		StaleNodeTimeout:        getDurationEnv("STALE_NODE_TIMEOUT", 90*time.Second),
 		HeartbeatExpectedInterval: getDurationEnv("HEARTBEAT_INTERVAL", 15*time.Second),

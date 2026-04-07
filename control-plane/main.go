@@ -16,6 +16,7 @@ import (
 	"valhalla/control-plane/middleware"
 	"valhalla/control-plane/scheduler"
 	"valhalla/control-plane/service"
+	"valhalla/control-plane/stun"
 )
 
 func main() {
@@ -98,6 +99,19 @@ func main() {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+
+	// Embedded STUN server
+	stunServer := stun.NewServer(logger)
+	go func() {
+		if err := stunServer.ListenAndServe(cfg.STUNAddr); err != nil {
+			logger.Error("STUN primary listener failed", zap.Error(err))
+		}
+	}()
+	go func() {
+		if err := stunServer.ListenAndServe(cfg.STUNAltAddr); err != nil {
+			logger.Error("STUN alt listener failed", zap.Error(err))
+		}
+	}()
 
 	// Start schedulers
 	routeRecalc := scheduler.NewRouteRecalculator(routeService, cfg.RouteRecalcInterval, logger)
