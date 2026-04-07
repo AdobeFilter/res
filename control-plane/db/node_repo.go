@@ -19,13 +19,17 @@ func NewNodeRepository(pool *pgxpool.Pool) NodeRepository {
 }
 
 const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-	regexp_replace(host(internal_ip), '^::ffff:', ''), status, sort_order, shared_folder, last_seen, created_at`
+	host(internal_ip), status, sort_order, shared_folder, last_seen, created_at`
 
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 	var internalIP *net.IP
 	if node.InternalIP != "" {
 		ip := net.ParseIP(node.InternalIP)
-		internalIP = &ip
+		if ip4 := ip.To4(); ip4 != nil {
+			internalIP = &ip4
+		} else {
+			internalIP = &ip
+		}
 	}
 
 	err := r.pool.QueryRow(ctx,
