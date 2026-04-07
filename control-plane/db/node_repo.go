@@ -19,7 +19,7 @@ func NewNodeRepository(pool *pgxpool.Pool) NodeRepository {
 }
 
 const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-	host(internal_ip), status, sort_order, shared_folder, last_seen, created_at`
+	regexp_replace(host(internal_ip), '^::ffff:', ''), status, sort_order, shared_folder, last_seen, created_at`
 
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 	var internalIP *net.IP
