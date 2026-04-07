@@ -96,6 +96,13 @@ func (s *NodeService) ProcessHeartbeat(ctx context.Context, req protocol.Heartbe
 		return nil, fmt.Errorf("update last seen: %w", err)
 	}
 
+	// Update endpoint if provided
+	if req.Endpoint != "" {
+		if err := s.nodes.UpdateEndpoint(ctx, req.NodeID, req.Endpoint, api.NATType("")); err != nil {
+			s.logger.Warn("failed to update endpoint", zap.Error(err))
+		}
+	}
+
 	// Store metrics
 	req.Metrics.NodeID = req.NodeID
 	if err := s.metrics.Insert(ctx, &req.Metrics); err != nil {
