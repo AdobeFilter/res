@@ -103,6 +103,13 @@ func (s *NodeService) ProcessHeartbeat(ctx context.Context, req protocol.Heartbe
 		}
 	}
 
+	// Update LAN IP if provided
+	if req.LanIP != "" {
+		if err := s.nodes.UpdateLanIP(ctx, req.NodeID, req.LanIP); err != nil {
+			s.logger.Warn("failed to update lan_ip", zap.Error(err))
+		}
+	}
+
 	// Store metrics
 	req.Metrics.NodeID = req.NodeID
 	if err := s.metrics.Insert(ctx, &req.Metrics); err != nil {

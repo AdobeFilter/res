@@ -18,7 +18,7 @@ func NewNodeRepository(pool *pgxpool.Pool) NodeRepository {
 }
 
 const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, nat_type,
-	host(internal_ip), status, sort_order, shared_folder, last_seen, created_at`
+	host(internal_ip), status, sort_order, shared_folder, lan_ip, last_seen, created_at`
 
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 	err := r.pool.QueryRow(ctx,
@@ -37,19 +37,19 @@ func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 
 func (r *pgNodeRepo) GetByID(ctx context.Context, id string) (*api.NodeInfo, error) {
 	var n api.NodeInfo
-	var osStr, endpoint, natType, intIP, sharedFolder *string
+	var osStr, endpoint, natType, intIP, sharedFolder, lanIP *string
 	err := r.pool.QueryRow(ctx,
 		`SELECT `+nodeColumns+` FROM nodes WHERE id=$1`, id,
 	).Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
 		&endpoint, &natType, &intIP, &n.Status,
-		&n.SortOrder, &sharedFolder, &n.LastSeen, &n.CreatedAt)
+		&n.SortOrder, &sharedFolder, &lanIP, &n.LastSeen, &n.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, api.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get node: %w", err)
 	}
-	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder)
+	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder, lanIP)
 	return &n, nil
 }
 
@@ -141,7 +141,7 @@ func (r *pgNodeRepo) Delete(ctx context.Context, nodeID string) error {
 	return err
 }
 
-func applyScanHelper(n *api.NodeInfo, osStr, endpoint, natType, intIP, sharedFolder *string) {
+func applyScanHelper(n *api.NodeInfo, osStr, endpoint, natType, intIP, sharedFolder, lanIP *string) {
 	if osStr != nil {
 		n.OS = *osStr
 	}
@@ -157,19 +157,30 @@ func applyScanHelper(n *api.NodeInfo, osStr, endpoint, natType, intIP, sharedFol
 	if sharedFolder != nil {
 		n.SharedFolder = *sharedFolder
 	}
+	if lanIP != nil {
+		n.LanIP = *lanIP
+	}
+}
+
+func (r *pgNodeRepo) UpdateLanIP(ctx context.Context, nodeID, lanIP string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE nodes SET lan_ip=$2 WHERE id=$1`,
+		nodeID, nullString(lanIP),
+	)
+	return err
 }
 
 func scanNodes(rows pgx.Rows) ([]*api.NodeInfo, error) {
 	var nodes []*api.NodeInfo
 	for rows.Next() {
 		var n api.NodeInfo
-		var osStr, endpoint, natType, intIP, sharedFolder *string
+		var osStr, endpoint, natType, intIP, sharedFolder, lanIP *string
 		if err := rows.Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
 			&endpoint, &natType, &intIP, &n.Status,
-			&n.SortOrder, &sharedFolder, &n.LastSeen, &n.CreatedAt); err != nil {
+			&n.SortOrder, &sharedFolder, &lanIP, &n.LastSeen, &n.CreatedAt); err != nil {
 			return nil, err
 		}
-		applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder)
+		applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder, lanIP)
 		nodes = append(nodes, &n)
 	}
 	return nodes, rows.Err()

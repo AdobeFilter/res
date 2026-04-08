@@ -6,6 +6,7 @@ import "valhalla/common/api"
 type HeartbeatRequest struct {
 	NodeID   string      `json:"node_id"`
 	Endpoint string      `json:"endpoint,omitempty"`
+	LanIP    string      `json:"lan_ip,omitempty"`
 	Metrics  api.Metrics `json:"metrics"`
 }
 

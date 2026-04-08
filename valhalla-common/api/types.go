@@ -68,6 +68,7 @@ type NodeInfo struct {
 	OS         string     `json:"os,omitempty"`
 	PublicKey  string     `json:"public_key"`
 	Endpoint   string     `json:"endpoint,omitempty"`
+	LanIP      string     `json:"lan_ip,omitempty"`
 	NATType    NATType    `json:"nat_type,omitempty"`
 	InternalIP string     `json:"internal_ip,omitempty"`
 	Status       NodeStatus `json:"status"`

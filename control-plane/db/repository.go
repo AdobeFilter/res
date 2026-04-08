@@ -30,6 +30,7 @@ type NodeRepository interface {
 	UpdateEndpoint(ctx context.Context, nodeID, endpoint string, natType api.NATType) error
 	UpdateStatus(ctx context.Context, nodeID string, status api.NodeStatus) error
 	UpdateName(ctx context.Context, nodeID, name string) error
+	UpdateLanIP(ctx context.Context, nodeID, lanIP string) error
 	UpdateSortOrder(ctx context.Context, nodeID string, sortOrder int) error
 	UpdateSharedFolder(ctx context.Context, nodeID, folder string) error
 	UpdateLastSeen(ctx context.Context, nodeID string) error
