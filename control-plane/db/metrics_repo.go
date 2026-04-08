@@ -86,9 +86,9 @@ func (a *pgIPAllocator) FindAvailable(ctx context.Context) (string, error) {
 	err := a.pool.QueryRow(ctx,
 		`SELECT host(candidate)::text
 		FROM generate_series(1, (1 << (32 - masklen($1::cidr))) - 2) AS s(off),
-		     LATERAL (SELECT ($1::inet + s.off)::inet AS candidate) sub
-		LEFT JOIN ip_allocations ia ON ia.ip = sub.candidate
-		LEFT JOIN nodes n ON n.internal_ip = sub.candidate
+		     LATERAL (SELECT set_masklen(($1::inet + s.off)::inet, 32) AS candidate) sub
+		LEFT JOIN ip_allocations ia ON host(ia.ip) = host(sub.candidate)
+		LEFT JOIN nodes n ON host(n.internal_ip) = host(sub.candidate)
 		WHERE ia.ip IS NULL AND n.internal_ip IS NULL
 		LIMIT 1`,
 		a.meshNet,
