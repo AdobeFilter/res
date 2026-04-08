@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"net"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,23 +21,13 @@ const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, 
 	host(internal_ip), status, sort_order, shared_folder, last_seen, created_at`
 
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
-	var internalIP *net.IP
-	if node.InternalIP != "" {
-		ip := net.ParseIP(node.InternalIP)
-		if ip4 := ip.To4(); ip4 != nil {
-			internalIP = &ip4
-		} else {
-			internalIP = &ip
-		}
-	}
-
 	err := r.pool.QueryRow(ctx,
 		`INSERT INTO nodes (account_id, name, node_type, os, public_key, endpoint, nat_type, internal_ip, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9)
 		 RETURNING id, created_at`,
 		node.AccountID, node.Name, node.NodeType, nullString(node.OS), node.PublicKey,
 		nullString(node.Endpoint), nullString(string(node.NATType)),
-		internalIP, node.Status,
+		nullString(node.InternalIP), node.Status,
 	).Scan(&node.ID, &node.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)
