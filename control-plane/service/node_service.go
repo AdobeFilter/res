@@ -40,13 +40,40 @@ func NewNodeService(
 	}
 }
 
-// RegisterNode creates a new node, allocates an internal IP, and returns peer list.
+// RegisterNode creates or re-registers a node. If device_id matches an existing node
+// for this account, the existing node is updated instead of creating a duplicate.
 func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req protocol.NodeRegisterRequest) (*protocol.NodeRegisterResponse, error) {
+	// Try to find existing node by device_id
+	if req.DeviceID != "" {
+		existing, err := s.nodes.GetByDeviceID(ctx, accountID, req.DeviceID)
+		if err == nil && existing != nil {
+			// Update existing node
+			existing.Name = req.Name
+			existing.PublicKey = req.PublicKey
+			existing.OS = req.OS
+			existing.Status = api.NodeStatusOnline
+			if err := s.nodes.UpdateReregister(ctx, existing); err != nil {
+				s.logger.Warn("failed to update existing node", zap.Error(err))
+			} else {
+				s.logger.Info("re-registered existing node",
+					zap.String("node_id", existing.ID),
+					zap.String("device_id", req.DeviceID))
+				peers, _ := s.getPeers(ctx, existing.ID)
+				return &protocol.NodeRegisterResponse{
+					NodeID:     existing.ID,
+					InternalIP: existing.InternalIP,
+					Peers:      peers,
+				}, nil
+			}
+		}
+	}
+
 	node := &api.NodeInfo{
 		AccountID: accountID,
 		Name:      req.Name,
 		NodeType:  req.NodeType,
 		OS:        req.OS,
+		DeviceID:  req.DeviceID,
 		PublicKey: req.PublicKey,
 		Status:    api.NodeStatusOnline,
 	}

@@ -20,14 +20,40 @@ func NewNodeRepository(pool *pgxpool.Pool) NodeRepository {
 const nodeColumns = `id, account_id, name, node_type, os, public_key, endpoint, nat_type,
 	host(internal_ip), status, sort_order, shared_folder, lan_ip, last_seen, created_at`
 
+func (r *pgNodeRepo) GetByDeviceID(ctx context.Context, accountID, deviceID string) (*api.NodeInfo, error) {
+	var n api.NodeInfo
+	var osStr, endpoint, natType, intIP, sharedFolder, lanIP *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT `+nodeColumns+` FROM nodes WHERE account_id=$1 AND device_id=$2`, accountID, deviceID,
+	).Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
+		&endpoint, &natType, &intIP, &n.Status,
+		&n.SortOrder, &sharedFolder, &lanIP, &n.LastSeen, &n.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, api.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get node by device_id: %w", err)
+	}
+	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder, lanIP)
+	return &n, nil
+}
+
+func (r *pgNodeRepo) UpdateReregister(ctx context.Context, node *api.NodeInfo) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE nodes SET name=$2, public_key=$3, os=$4, status=$5, last_seen=NOW() WHERE id=$1`,
+		node.ID, node.Name, node.PublicKey, nullString(node.OS), node.Status,
+	)
+	return err
+}
+
 func (r *pgNodeRepo) Create(ctx context.Context, node *api.NodeInfo) error {
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO nodes (account_id, name, node_type, os, public_key, endpoint, nat_type, internal_ip, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9)
+		`INSERT INTO nodes (account_id, name, node_type, os, public_key, endpoint, nat_type, internal_ip, status, device_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10)
 		 RETURNING id, created_at`,
 		node.AccountID, node.Name, node.NodeType, nullString(node.OS), node.PublicKey,
 		nullString(node.Endpoint), nullString(string(node.NATType)),
-		nullString(node.InternalIP), node.Status,
+		nullString(node.InternalIP), node.Status, nullString(node.DeviceID),
 	).Scan(&node.ID, &node.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)

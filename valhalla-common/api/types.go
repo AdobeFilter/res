@@ -66,6 +66,7 @@ type NodeInfo struct {
 	Name       string     `json:"name"`
 	NodeType   NodeType   `json:"node_type"`
 	OS         string     `json:"os,omitempty"`
+	DeviceID   string     `json:"device_id,omitempty"`
 	PublicKey  string     `json:"public_key"`
 	Endpoint   string     `json:"endpoint,omitempty"`
 	LanIP      string     `json:"lan_ip,omitempty"`

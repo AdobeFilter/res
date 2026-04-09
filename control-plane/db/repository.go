@@ -24,7 +24,9 @@ type AccountSettingsRepository interface {
 type NodeRepository interface {
 	Create(ctx context.Context, node *api.NodeInfo) error
 	GetByID(ctx context.Context, id string) (*api.NodeInfo, error)
+	GetByDeviceID(ctx context.Context, accountID, deviceID string) (*api.NodeInfo, error)
 	GetByAccountID(ctx context.Context, accountID string) ([]*api.NodeInfo, error)
+	UpdateReregister(ctx context.Context, node *api.NodeInfo) error
 	GetOnlineByType(ctx context.Context, nodeType api.NodeType) ([]*api.NodeInfo, error)
 	GetAllOnline(ctx context.Context) ([]*api.NodeInfo, error)
 	UpdateEndpoint(ctx context.Context, nodeID, endpoint string, natType api.NATType) error

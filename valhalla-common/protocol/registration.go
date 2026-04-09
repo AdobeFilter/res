@@ -26,6 +26,7 @@ type NodeRegisterRequest struct {
 	NodeType  api.NodeType `json:"node_type"`
 	OS        string       `json:"os,omitempty"`
 	PublicKey string       `json:"public_key"`
+	DeviceID  string       `json:"device_id,omitempty"`
 }
 
 type NodeUpdateRequest struct {
