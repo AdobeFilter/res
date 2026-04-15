@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 log() { echo -e "${GREEN}[+]${NC} $1"; }
 err() { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
-XRAY_VERSION="25.3.6"
+XRAY_VERSION="26.3.27"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/share/xray"
 CONFIG_DIR="/etc/valhalla"
