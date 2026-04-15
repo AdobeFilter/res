@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,11 +15,14 @@ import (
 	"valhalla/control-plane/middleware"
 )
 
+//go:embed scripts/xray-exit.sh
+var installScript embed.FS
+
 const (
-	credentialsPath  = "/etc/valhalla/credentials.txt"
-	installScriptURL = "https://raw.githubusercontent.com/nicknsy/valhalla/main/exit-node/install/xray-exit.sh"
-	sshTimeout       = 30 * time.Second
-	commandTimeout   = 120 * time.Second
+	credentialsPath = "/etc/valhalla/credentials.txt"
+	remoteTmpScript = "/tmp/valhalla-xray-exit.sh"
+	sshTimeout      = 30 * time.Second
+	commandTimeout  = 180 * time.Second
 )
 
 type SSHProxyHandler struct {
@@ -113,13 +117,23 @@ func (h *SSHProxyHandler) runSSHSetup(req sshSetupRequest) (string, error) {
 		return shareLink, nil
 	}
 
-	// 2. Install xray
-	_, err = h.execCommand(client, fmt.Sprintf("curl -sL %s | bash", installScriptURL))
+	// 2. Upload install script via SSH
+	scriptData, err := installScript.ReadFile("scripts/xray-exit.sh")
+	if err != nil {
+		return "", fmt.Errorf("read embedded script: %w", err)
+	}
+
+	if err := h.uploadFile(client, remoteTmpScript, scriptData); err != nil {
+		return "", fmt.Errorf("upload script: %w", err)
+	}
+
+	// 3. Execute the script
+	_, err = h.execCommand(client, fmt.Sprintf("bash %s && rm -f %s", remoteTmpScript, remoteTmpScript))
 	if err != nil {
 		return "", fmt.Errorf("install: %w", err)
 	}
 
-	// 3. Read credentials after install
+	// 4. Read credentials after install
 	shareLink, err = h.readShareLink(client)
 	if err != nil {
 		return "", fmt.Errorf("read credentials: %w", err)
@@ -129,6 +143,26 @@ func (h *SSHProxyHandler) runSSHSetup(req sshSetupRequest) (string, error) {
 	}
 
 	return shareLink, nil
+}
+
+func (h *SSHProxyHandler) uploadFile(client *ssh.Client, remotePath string, data []byte) error {
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer session.Close()
+
+	// Use cat to write file contents via stdin
+	session.Stdin = bytes.NewReader(data)
+
+	var stderr bytes.Buffer
+	session.Stderr = &stderr
+
+	cmd := fmt.Sprintf("cat > %s && chmod +x %s", remotePath, remotePath)
+	if err := session.Run(cmd); err != nil {
+		return fmt.Errorf("write file: %w (stderr: %s)", err, stderr.String())
+	}
+	return nil
 }
 
 func (h *SSHProxyHandler) readShareLink(client *ssh.Client) (string, error) {
