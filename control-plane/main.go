@@ -12,6 +12,7 @@ import (
 	"valhalla/common/crypto"
 	"valhalla/control-plane/config"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/dns"
 	"valhalla/control-plane/handler"
 	"valhalla/control-plane/middleware"
 	"valhalla/control-plane/scheduler"
@@ -62,7 +63,11 @@ func main() {
 	routeHandler := handler.NewRouteHandler(routeService, stunRepo, logger)
 	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, logger)
 	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, logger)
-	sshProxyHandler := handler.NewSSHProxyHandler(logger)
+	dnsClient := dns.NewDNSClient(cfg.DNSApiToken, cfg.DNSDomain)
+	if dnsClient.Enabled() {
+		logger.Info("deSEC DNS auto-domain enabled", zap.String("domain", cfg.DNSDomain))
+	}
+	sshProxyHandler := handler.NewSSHProxyHandler(logger, dnsClient)
 
 	// Router
 	mux := http.NewServeMux()

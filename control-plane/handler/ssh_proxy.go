@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
+	"valhalla/control-plane/dns"
 	"valhalla/control-plane/middleware"
 )
 
@@ -27,10 +28,11 @@ const (
 
 type SSHProxyHandler struct {
 	logger *zap.Logger
+	cf     *dns.DNSClient
 }
 
-func NewSSHProxyHandler(logger *zap.Logger) *SSHProxyHandler {
-	return &SSHProxyHandler{logger: logger}
+func NewSSHProxyHandler(logger *zap.Logger, cf *dns.DNSClient) *SSHProxyHandler {
+	return &SSHProxyHandler{logger: logger, cf: cf}
 }
 
 type sshSetupRequest struct {
@@ -42,6 +44,7 @@ type sshSetupRequest struct {
 
 type sshSetupResponse struct {
 	ShareLink string `json:"share_link"`
+	Domain    string `json:"domain,omitempty"`
 }
 
 // Setup handles POST /api/v1/ssh/setup
@@ -84,7 +87,44 @@ func (h *SSHProxyHandler) Setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sshSetupResponse{ShareLink: shareLink})
+	// Auto-assign domain via deSEC if configured
+	resp := sshSetupResponse{ShareLink: shareLink}
+	if h.cf.Enabled() {
+		domain, err := h.cf.CreateExitNodeDomain(req.Host)
+		if err != nil {
+			h.logger.Warn("DNS record creation failed, returning IP-based link",
+				zap.Error(err),
+			)
+		} else {
+			h.logger.Info("created DNS record",
+				zap.String("domain", domain),
+				zap.String("ip", req.Host),
+			)
+			resp.Domain = domain
+			resp.ShareLink = replaceHostInVlessLink(shareLink, domain)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// replaceHostInVlessLink replaces the IP/host in a vless:// URI with a domain.
+// vless://uuid@OLD_HOST:port?params#name → vless://uuid@NEW_HOST:port?params#name
+func replaceHostInVlessLink(link, newHost string) string {
+	// Format: vless://uuid@host:port?params#name
+	atIdx := strings.Index(link, "@")
+	if atIdx < 0 {
+		return link
+	}
+	afterAt := link[atIdx+1:]
+
+	// Find the colon before port (after the host)
+	colonIdx := strings.Index(afterAt, ":")
+	if colonIdx < 0 {
+		return link
+	}
+
+	return link[:atIdx+1] + newHost + afterAt[colonIdx:]
 }
 
 func (h *SSHProxyHandler) runSSHSetup(req sshSetupRequest) (string, error) {
@@ -152,7 +192,6 @@ func (h *SSHProxyHandler) uploadFile(client *ssh.Client, remotePath string, data
 	}
 	defer session.Close()
 
-	// Use cat to write file contents via stdin
 	session.Stdin = bytes.NewReader(data)
 
 	var stderr bytes.Buffer

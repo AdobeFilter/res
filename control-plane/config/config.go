@@ -30,6 +30,11 @@ type Config struct {
 	RouteRecalcInterval    time.Duration
 	StaleNodeTimeout       time.Duration
 	HeartbeatExpectedInterval time.Duration
+
+	// deSEC DNS (optional — for auto-domain on exit nodes)
+	// Register free at desec.io, create a dedyn.io domain
+	DNSApiToken string // deSEC API token
+	DNSDomain   string // e.g. "valhalla.dedyn.io"
 }
 
 func Load() *Config {
@@ -46,6 +51,8 @@ func Load() *Config {
 		RouteRecalcInterval:     getDurationEnv("ROUTE_RECALC_INTERVAL", 30*time.Second),
 		StaleNodeTimeout:        getDurationEnv("STALE_NODE_TIMEOUT", 90*time.Second),
 		HeartbeatExpectedInterval: getDurationEnv("HEARTBEAT_INTERVAL", 15*time.Second),
+		DNSApiToken:              getEnv("DNS_API_TOKEN", ""),
+		DNSDomain:                getEnv("DNS_DOMAIN", ""),
 	}
 }
 
