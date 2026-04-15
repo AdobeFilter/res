@@ -1,0 +1,148 @@
+{
+  "log": {
+    "access": "none",
+    "dnsLog": false,
+    "error": "",
+    "loglevel": "warning",
+    "maskAddress": ""
+  },
+  "dns": {
+    "tag": "dns",
+    "hosts": {
+      "cloudflare-dns.com": [
+        "172.67.73.38",
+        "104.19.155.92",
+        "172.67.73.163",
+        "104.18.155.42",
+        "104.16.124.175",
+        "104.16.248.249",
+        "104.16.249.249",
+        "104.26.13.8"
+      ],
+      "domain:youtube.com": [
+        "google.com"
+      ]
+    },
+    "servers": [
+      "https://cloudflare-dns.com/dns-query"
+    ]
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "127.0.0.1",
+      "port": 62789,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "fragment-out",
+      "domainStrategy": "UseIPv4",
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tcpNoDelay": true,
+          "tcpKeepAliveInterval": 30,
+          "tcpKeepAliveIdle": 100,
+          "mark": 255,
+          "domainStrategy": "UseIP"
+        }
+      }
+    },
+    {
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 40000,
+            "users": []
+          }
+        ]
+      },
+      "tag": "warp-mod"
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true,
+        "bufferSize": 4096
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true,
+      "statsOutboundDownlink": false,
+      "statsOutboundUplink": false
+    }
+  },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "domain": [
+          "whatismyip.com",
+          "geosite:reddit"
+        ],
+        "port": "443",
+        "inboundTag": [
+          "inbound-443"
+        ],
+        "outboundTag": "warp-mod"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "ip": [
+          "geoip:private"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  },
+  "stats": {},
+  "metrics": {
+    "tag": "metrics_out",
+    "listen": "127.0.0.1:11111"
+  }
+}

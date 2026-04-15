@@ -62,6 +62,7 @@ func main() {
 	routeHandler := handler.NewRouteHandler(routeService, stunRepo, logger)
 	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, logger)
 	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, logger)
+	sshProxyHandler := handler.NewSSHProxyHandler(logger)
 
 	// Router
 	mux := http.NewServeMux()
@@ -89,6 +90,7 @@ func main() {
 	mux.Handle("GET /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.GetSettings)))
 	mux.Handle("PUT /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.UpdateSettings)))
 	mux.Handle("GET /api/v1/accounts/{id}/devices", authMw(http.HandlerFunc(settingsHandler.GetDevices)))
+	mux.Handle("POST /api/v1/ssh/setup", authMw(http.HandlerFunc(sshProxyHandler.Setup)))
 
 	// Apply logging middleware
 	logMw := middleware.Logging(logger)
@@ -96,7 +98,7 @@ func main() {
 		Addr:         cfg.ListenAddr,
 		Handler:      logMw(mux),
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 180 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
