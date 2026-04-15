@@ -11,13 +11,13 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 log() { echo -e "${GREEN}[+]${NC} $1"; }
 err() { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
-XRAY_VERSION="1.8.24"
+XRAY_VERSION="25.3.6"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/usr/local/share/xray"
 CONFIG_DIR="/etc/valhalla"
 XRAY_CONFIG="${CONFIG_DIR}/xray.json"
-XRAY_PORT=443
-SNI_DOMAIN="microsoft.com"
+XRAY_PORT=8443
+SNI_DOMAIN="www.icloud.com"
 
 [[ $EUID -ne 0 ]] && err "Run as root: sudo bash $0"
 
