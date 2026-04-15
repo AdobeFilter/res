@@ -48,7 +48,7 @@ func (c *DNSClient) CreateExitNodeDomain(ip string) (string, error) {
 		"subname": subdomain,
 		"type":    "A",
 		"records": []string{ip},
-		"ttl":     60,
+		"ttl":     3600,
 	}
 
 	jsonBody, _ := json.Marshal(body)
@@ -86,7 +86,7 @@ func (c *DNSClient) CreateExitNodeDomain(ip string) (string, error) {
 func (c *DNSClient) updateRecord(subdomain, ip string) error {
 	body := map[string]interface{}{
 		"records": []string{ip},
-		"ttl":     60,
+		"ttl":     3600,
 	}
 	jsonBody, _ := json.Marshal(body)
 
