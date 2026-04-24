@@ -51,12 +51,30 @@ type Account struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// ExitNodeConfig is a VLESS / VMess / Trojan / Shadowsocks endpoint the user
+// added to their account. The full raw URI is persisted so the client can
+// reconstruct any protocol-specific params verbatim.
+type ExitNodeConfig struct {
+	Name     string `json:"name"`
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	UUID     string `json:"uuid"`
+	RawURI   string `json:"raw_uri"`
+}
+
 // AccountSettings holds account-level settings synced across all devices.
+// ExitNodes, RoutingRules and the feature flags are persisted server-side so
+// they survive logout, device switch, and reinstall.
 type AccountSettings struct {
-	AccountID    string    `json:"account_id"`
-	VLESSEnabled bool      `json:"vless_enabled"`
-	ExitNodeID   string    `json:"exit_node_id,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	AccountID       string           `json:"account_id"`
+	VLESSEnabled    bool             `json:"vless_enabled"`
+	ExitNodeID      string           `json:"exit_node_id,omitempty"`
+	ExitNodes       []ExitNodeConfig `json:"exit_nodes"`
+	RoutingRules    string           `json:"routing_rules,omitempty"`
+	FragmentEnabled bool             `json:"fragment_enabled"`
+	BlockAdsEnabled bool             `json:"block_ads_enabled"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 // NodeInfo represents a node in the mesh network.
@@ -128,9 +146,19 @@ type STUNServer struct {
 }
 
 // RelayServer represents a registered relay server.
+// Port is the UDP WG-hole-punch relay port. VLESSPort is a separate TCP port
+// on the same host running xray with VLESS+Reality — used by clients in Xray
+// mode to reach the mesh through an obfuscated channel. RealityPublicKey /
+// RealitySNI / RealityShortIDs / VLESSUUID are the credentials clients need
+// to build their outbound Xray config for this relay.
 type RelayServer struct {
-	ID       string `json:"id"`
-	Address  string `json:"address"`
-	Port     int    `json:"port"`
-	Capacity int    `json:"capacity"`
+	ID               string `json:"id"`
+	Address          string `json:"address"`
+	Port             int    `json:"port"`
+	VLESSPort        int    `json:"vless_port,omitempty"`
+	Capacity         int    `json:"capacity"`
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	RealityShortIDs  string `json:"reality_short_ids,omitempty"`
+	RealitySNI       string `json:"reality_sni,omitempty"`
+	VLESSUUID        string `json:"vless_uuid,omitempty"`
 }

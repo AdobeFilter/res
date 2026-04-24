@@ -24,10 +24,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Session table
+	// UDP WG hole-punch relay (existing).
 	sessions := relay.NewSessionTable(cfg.Capacity)
-
-	// UDP Forwarder (primary)
 	forwarder := relay.NewForwarder(sessions, logger)
 	go func() {
 		if err := forwarder.ListenAndServe(ctx, cfg.ListenAddr); err != nil {
@@ -35,7 +33,7 @@ func main() {
 		}
 	}()
 
-	// TCP Relay (fallback for UDP-blocked networks)
+	// TCP fallback for UDP-blocked networks (existing).
 	tcpRelay := transport.NewTCPRelay(logger)
 	go func() {
 		if err := tcpRelay.ListenAndServe(ctx, cfg.TCPListenAddr); err != nil {
@@ -43,25 +41,56 @@ func main() {
 		}
 	}()
 
-	// VLESS+Reality Relay (for censored networks)
-	vlessRelay := transport.NewVLESSRelay(443, logger)
-	_ = vlessRelay // Will be started when VLESS config is provided
-
-	// Register with control plane
-	port := 51821
+	// Derive numeric UDP port for registration.
+	udpPort := 51821
 	if parts := strings.Split(cfg.ListenAddr, ":"); len(parts) == 2 {
 		if p, err := strconv.Atoi(parts[1]); err == nil {
-			port = p
+			udpPort = p
 		}
 	}
-	go registration.RegisterWithControlPlane(ctx, cfg.ControlPlaneURL, cfg.PublicAddress, port, cfg.Capacity, logger)
+
+	// Registrar: heartbeats control-plane, publishes Reality credentials
+	// once on first successful registration.
+	registrar := registration.New(
+		cfg.ControlPlaneURL,
+		cfg.PublicAddress,
+		udpPort,
+		cfg.VLESSPort,
+		cfg.Capacity,
+		logger,
+	)
+	go registrar.Run(ctx)
+
+	// VLESS+Reality — xray subprocess, started once credentials arrive.
+	vlessRelay := transport.NewVLESSRelay(cfg.VLESSPort, cfg.XrayBinary, logger)
+	defer vlessRelay.Stop()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case creds, ok := <-registrar.Credentials():
+			if !ok {
+				return
+			}
+			if err := vlessRelay.Start(ctx,
+				creds.VLESSUUID,
+				creds.RealityPrivateKey,
+				creds.RealityPublicKey,
+				creds.RealityShortIDs,
+				creds.RealitySNI,
+			); err != nil {
+				logger.Error("failed to start VLESS relay", zap.Error(err))
+			}
+		}
+	}()
 
 	logger.Info("relay node started",
 		zap.String("udp", cfg.ListenAddr),
 		zap.String("tcp", cfg.TCPListenAddr),
+		zap.String("vless", cfg.VLESSListenAddr),
 		zap.Int("capacity", cfg.Capacity))
 
-	// Wait for shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"valhalla/common/api"
 )
@@ -18,6 +19,10 @@ type AccountSettingsRepository interface {
 	Get(ctx context.Context, accountID string) (*api.AccountSettings, error)
 	Upsert(ctx context.Context, accountID string, vlessEnabled bool) (*api.AccountSettings, error)
 	SetExitNode(ctx context.Context, accountID string, exitNodeID *string) (*api.AccountSettings, error)
+	SetExitNodes(ctx context.Context, accountID string, nodes []api.ExitNodeConfig) (*api.AccountSettings, error)
+	SetRoutingRules(ctx context.Context, accountID string, rules string) (*api.AccountSettings, error)
+	SetFragmentEnabled(ctx context.Context, accountID string, enabled bool) (*api.AccountSettings, error)
+	SetBlockAdsEnabled(ctx context.Context, accountID string, enabled bool) (*api.AccountSettings, error)
 }
 
 // NodeRepository handles node persistence.
@@ -37,6 +42,10 @@ type NodeRepository interface {
 	UpdateSharedFolder(ctx context.Context, nodeID, folder string) error
 	UpdateLastSeen(ctx context.Context, nodeID string) error
 	Delete(ctx context.Context, nodeID string) error
+	// DeleteStaleBefore removes any node whose last_seen is older than cutoff
+	// (or whose last_seen is NULL and whose created_at is older than cutoff).
+	// Returns the number of rows deleted.
+	DeleteStaleBefore(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // MetricsRepository handles node metrics.
@@ -67,9 +76,29 @@ type STUNServerRepository interface {
 	GetAll(ctx context.Context) ([]api.STUNServer, error)
 }
 
+// RelayCredentials are the Reality keypair + VLESS UUID + SNI we hand back
+// to a relay when it registers. Stored in the DB so the same credentials are
+// returned on every restart (rotating would break clients that cached pbk).
+type RelayCredentials struct {
+	VLESSUUID         string
+	RealityPrivateKey string
+	RealityPublicKey  string
+	RealityShortIDs   string // comma-separated
+	RealitySNI        string
+}
+
 // RelayServerRepository handles relay server registration.
 type RelayServerRepository interface {
-	Upsert(ctx context.Context, id, address string, port, capacity int) error
+	// UpsertWithCredentials registers a relay and returns its Reality
+	// credentials — generating and storing a fresh set on first call for a
+	// given (address, port) pair, returning the stored ones on subsequent
+	// calls. vlessPort is the TCP port where xray will listen.
+	UpsertWithCredentials(
+		ctx context.Context,
+		id, address string,
+		port, vlessPort, capacity int,
+	) (*RelayCredentials, error)
+
 	GetAll(ctx context.Context) ([]api.RelayServer, error)
 	GetBestAvailable(ctx context.Context) (*api.RelayServer, error)
 }

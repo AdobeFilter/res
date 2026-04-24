@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -165,6 +166,23 @@ func (r *pgNodeRepo) UpdateLastSeen(ctx context.Context, nodeID string) error {
 func (r *pgNodeRepo) Delete(ctx context.Context, nodeID string) error {
 	_, err := r.pool.Exec(ctx, `DELETE FROM nodes WHERE id=$1`, nodeID)
 	return err
+}
+
+// DeleteStaleBefore removes every node whose last_seen is older than cutoff.
+// Nodes that never heartbeated (last_seen IS NULL) fall back to created_at —
+// so a device that registered but never came online gets garbage-collected
+// on the same schedule.
+func (r *pgNodeRepo) DeleteStaleBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM nodes
+		 WHERE (last_seen IS NOT NULL AND last_seen < $1)
+		    OR (last_seen IS NULL     AND created_at < $1)`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete stale nodes: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func applyScanHelper(n *api.NodeInfo, osStr, endpoint, natType, intIP, sharedFolder, lanIP *string) {

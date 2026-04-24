@@ -27,6 +27,17 @@ if ! command -v go &>/dev/null; then
     export PATH=$PATH:/usr/local/go/bin
 fi
 
+# Install Xray (needed for VLESS+Reality subprocess)
+if ! command -v xray &>/dev/null; then
+    log "Installing Xray..."
+    apt-get install -y -qq curl unzip
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    log "Xray installed: $(xray version | head -1)"
+    # The installer also creates a systemd unit that we don't want — our
+    # relay-node spawns xray with its own config, not the system one.
+    systemctl disable --now xray 2>/dev/null || true
+fi
+
 PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "")
 
 # Build binary
@@ -59,9 +70,14 @@ RestartSec=5
 Environment=LISTEN_ADDR=:51821
 Environment=TCP_LISTEN_ADDR=:51822
 Environment=VLESS_LISTEN_ADDR=:443
+Environment=XRAY_BINARY=/usr/local/bin/xray
 Environment=CONTROL_PLANE_URL=${CONTROL_PLANE_URL}
 Environment=PUBLIC_ADDRESS=${PUBLIC_IP}
 Environment=CAPACITY=${CAPACITY}
+
+# Let the relay bind to privileged port 443 without running the whole
+# process as root. Requires CAP_NET_BIND_SERVICE on the binary; we give
+# it below via setcap.
 
 StandardOutput=journal
 StandardError=journal
@@ -71,9 +87,13 @@ SyslogIdentifier=valhalla-relay
 WantedBy=multi-user.target
 EOF
 
+# Give the binaries privilege to bind 443 without full root.
+setcap 'cap_net_bind_service=+ep' /usr/local/bin/valhalla-relay || true
+setcap 'cap_net_bind_service=+ep' /usr/local/bin/xray             || true
+
 systemctl daemon-reload
 systemctl enable valhalla-relay
-systemctl start valhalla-relay
+systemctl restart valhalla-relay
 
 # Firewall
 if command -v ufw &>/dev/null; then

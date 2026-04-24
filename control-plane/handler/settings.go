@@ -43,7 +43,9 @@ func (h *SettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.SettingsResponse{Settings: *settings})
 }
 
-// UpdateSettings handles PUT /api/v1/accounts/{id}/settings
+// UpdateSettings handles PUT /api/v1/accounts/{id}/settings. Every field on
+// the request body is optional; only non-nil fields are applied. Returns the
+// full settings snapshot after applying the patch.
 func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	accountID := middleware.GetAccountID(r.Context())
 
@@ -53,13 +55,25 @@ func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if req.VLESSEnabled == nil && req.ExitNodeID == nil {
+	if req.VLESSEnabled == nil && req.ExitNodeID == nil && req.ExitNodes == nil &&
+		req.RoutingRules == nil && req.FragmentEnabled == nil && req.BlockAdsEnabled == nil {
 		writeError(w, http.StatusBadRequest, "no settings to update")
 		return
 	}
 
-	var settings *api.AccountSettings
-	var err error
+	var (
+		settings *api.AccountSettings
+		err      error
+	)
+
+	if req.VLESSEnabled != nil {
+		settings, err = h.settings.Upsert(r.Context(), accountID, *req.VLESSEnabled)
+		if err != nil {
+			h.logger.Error("update vless_enabled failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to update settings")
+			return
+		}
+	}
 
 	if req.ExitNodeID != nil {
 		exitID := *req.ExitNodeID
@@ -75,11 +89,38 @@ func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if req.VLESSEnabled != nil {
-		settings, err = h.settings.Upsert(r.Context(), accountID, *req.VLESSEnabled)
+	if req.ExitNodes != nil {
+		settings, err = h.settings.SetExitNodes(r.Context(), accountID, *req.ExitNodes)
 		if err != nil {
-			h.logger.Error("update settings failed", zap.Error(err))
-			writeError(w, http.StatusInternalServerError, "failed to update settings")
+			h.logger.Error("set exit nodes failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to set exit nodes")
+			return
+		}
+	}
+
+	if req.RoutingRules != nil {
+		settings, err = h.settings.SetRoutingRules(r.Context(), accountID, *req.RoutingRules)
+		if err != nil {
+			h.logger.Error("set routing rules failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to set routing rules")
+			return
+		}
+	}
+
+	if req.FragmentEnabled != nil {
+		settings, err = h.settings.SetFragmentEnabled(r.Context(), accountID, *req.FragmentEnabled)
+		if err != nil {
+			h.logger.Error("set fragment enabled failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to set fragment enabled")
+			return
+		}
+	}
+
+	if req.BlockAdsEnabled != nil {
+		settings, err = h.settings.SetBlockAdsEnabled(r.Context(), accountID, *req.BlockAdsEnabled)
+		if err != nil {
+			h.logger.Error("set block ads enabled failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to set block ads enabled")
 			return
 		}
 	}

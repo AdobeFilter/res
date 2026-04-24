@@ -127,6 +127,11 @@ func main() {
 	staleCleaner := scheduler.NewStaleNodeCleaner(nodeRepo, cfg.StaleNodeTimeout, cfg.HeartbeatExpectedInterval, logger)
 	go staleCleaner.Start(ctx)
 
+	offlineDeleter := scheduler.NewOfflineNodeDeleter(
+		nodeRepo, cfg.OfflineNodeRetention, cfg.OfflineNodeSweepInterval, logger,
+	)
+	go offlineDeleter.Start(ctx)
+
 	// Start server
 	go func() {
 		logger.Info("control plane starting", zap.String("addr", cfg.ListenAddr))

@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"valhalla/common/api"
+	"valhalla/common/crypto"
 )
 
 type pgMetricsRepo struct {
@@ -178,19 +179,99 @@ func NewRelayServerRepository(pool *pgxpool.Pool) RelayServerRepository {
 	return &pgRelayRepo{pool: pool}
 }
 
-func (r *pgRelayRepo) Upsert(ctx context.Context, id, address string, port, capacity int) error {
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO relay_servers (id, address, port, capacity, last_seen)
-		 VALUES ($1, $2, $3, $4, NOW())
-		 ON CONFLICT (address, port) DO UPDATE SET capacity=$4, last_seen=NOW()`,
-		id, address, port, capacity,
+func (r *pgRelayRepo) UpsertWithCredentials(
+	ctx context.Context,
+	id, address string,
+	port, vlessPort, capacity int,
+) (*RelayCredentials, error) {
+	// Try to read existing credentials first — same (address, port) means
+	// same relay, keep its keys stable across restarts.
+	var existing RelayCredentials
+	var uuidStr *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT vless_uuid, reality_private_key, reality_public_key,
+		        reality_short_ids, reality_sni
+		 FROM relay_servers WHERE address=$1 AND port=$2`,
+		address, port,
+	).Scan(&uuidStr, &existing.RealityPrivateKey, &existing.RealityPublicKey,
+		&existing.RealityShortIDs, &existing.RealitySNI)
+
+	if err == nil && uuidStr != nil && *uuidStr != "" && existing.RealityPrivateKey != "" {
+		existing.VLESSUUID = *uuidStr
+		// Still refresh last_seen and capacity/port changes.
+		_, upErr := r.pool.Exec(ctx,
+			`UPDATE relay_servers SET capacity=$3, vless_port=$4, last_seen=NOW()
+			 WHERE address=$1 AND port=$2`,
+			address, port, capacity, vlessPort,
+		)
+		if upErr != nil {
+			return nil, fmt.Errorf("refresh relay heartbeat: %w", upErr)
+		}
+		return &existing, nil
+	}
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, fmt.Errorf("read relay credentials: %w", err)
+	}
+
+	// Either first registration for this relay or credentials never got
+	// generated (nulls from the migration default). Generate a fresh set.
+	kp, err := crypto.GenerateRealityKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate reality keypair: %w", err)
+	}
+	shortID, err := crypto.GenerateRealityShortID(8)
+	if err != nil {
+		return nil, fmt.Errorf("generate short id: %w", err)
+	}
+	// Postgres' uuid_generate_v4() is available (uuid-ossp extension is
+	// installed in migration 001), so we delegate UUID minting to the DB.
+	sni := "www.microsoft.com"
+
+	_, err = r.pool.Exec(ctx,
+		`INSERT INTO relay_servers
+		   (id, address, port, vless_port, capacity, last_seen,
+		    vless_uuid, reality_private_key, reality_public_key,
+		    reality_short_ids, reality_sni)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), uuid_generate_v4(), $6, $7, $8, $9)
+		 ON CONFLICT (address, port) DO UPDATE SET
+		   capacity   = EXCLUDED.capacity,
+		   vless_port = EXCLUDED.vless_port,
+		   last_seen  = NOW(),
+		   vless_uuid = COALESCE(relay_servers.vless_uuid, uuid_generate_v4()),
+		   reality_private_key = CASE WHEN relay_servers.reality_private_key = '' THEN EXCLUDED.reality_private_key ELSE relay_servers.reality_private_key END,
+		   reality_public_key  = CASE WHEN relay_servers.reality_public_key  = '' THEN EXCLUDED.reality_public_key  ELSE relay_servers.reality_public_key  END,
+		   reality_short_ids   = CASE WHEN relay_servers.reality_short_ids   = '' THEN EXCLUDED.reality_short_ids   ELSE relay_servers.reality_short_ids   END,
+		   reality_sni         = CASE WHEN relay_servers.reality_sni         = '' THEN EXCLUDED.reality_sni         ELSE relay_servers.reality_sni         END`,
+		id, address, port, vlessPort, capacity,
+		kp.PrivateKey, kp.PublicKey, shortID, sni,
 	)
-	return err
+	if err != nil {
+		return nil, fmt.Errorf("insert relay: %w", err)
+	}
+
+	// Read-back — in case the ON CONFLICT branch kept existing values.
+	var outUUID string
+	out := &RelayCredentials{}
+	err = r.pool.QueryRow(ctx,
+		`SELECT vless_uuid::text, reality_private_key, reality_public_key,
+		        reality_short_ids, reality_sni
+		 FROM relay_servers WHERE address=$1 AND port=$2`,
+		address, port,
+	).Scan(&outUUID, &out.RealityPrivateKey, &out.RealityPublicKey,
+		&out.RealityShortIDs, &out.RealitySNI)
+	if err != nil {
+		return nil, fmt.Errorf("read-back relay credentials: %w", err)
+	}
+	out.VLESSUUID = outUUID
+	return out, nil
 }
 
 func (r *pgRelayRepo) GetAll(ctx context.Context) ([]api.RelayServer, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, address, port, capacity FROM relay_servers WHERE last_seen > NOW() - INTERVAL '5 minutes'`)
+		`SELECT id, address, port, vless_port, capacity,
+		        reality_public_key, reality_short_ids, reality_sni,
+		        COALESCE(vless_uuid::text, '')
+		 FROM relay_servers WHERE last_seen > NOW() - INTERVAL '5 minutes'`)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +280,8 @@ func (r *pgRelayRepo) GetAll(ctx context.Context) ([]api.RelayServer, error) {
 	var servers []api.RelayServer
 	for rows.Next() {
 		var s api.RelayServer
-		if err := rows.Scan(&s.ID, &s.Address, &s.Port, &s.Capacity); err != nil {
+		if err := rows.Scan(&s.ID, &s.Address, &s.Port, &s.VLESSPort, &s.Capacity,
+			&s.RealityPublicKey, &s.RealityShortIDs, &s.RealitySNI, &s.VLESSUUID); err != nil {
 			return nil, err
 		}
 		servers = append(servers, s)
@@ -210,12 +292,16 @@ func (r *pgRelayRepo) GetAll(ctx context.Context) ([]api.RelayServer, error) {
 func (r *pgRelayRepo) GetBestAvailable(ctx context.Context) (*api.RelayServer, error) {
 	var s api.RelayServer
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, address, port, capacity FROM relay_servers
+		`SELECT id, address, port, vless_port, capacity,
+		        reality_public_key, reality_short_ids, reality_sni,
+		        COALESCE(vless_uuid::text, '')
+		 FROM relay_servers
 		 WHERE last_seen > NOW() - INTERVAL '5 minutes'
 		   AND active_sessions < capacity
 		 ORDER BY (capacity - active_sessions) DESC
 		 LIMIT 1`,
-	).Scan(&s.ID, &s.Address, &s.Port, &s.Capacity)
+	).Scan(&s.ID, &s.Address, &s.Port, &s.VLESSPort, &s.Capacity,
+		&s.RealityPublicKey, &s.RealityShortIDs, &s.RealitySNI, &s.VLESSUUID)
 	if err == pgx.ErrNoRows {
 		return nil, api.ErrRelayUnavailable
 	}

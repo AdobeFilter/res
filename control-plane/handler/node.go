@@ -253,7 +253,12 @@ func (h *InternalHandler) RegisterSTUN(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// RegisterRelay handles POST /api/v1/internal/relay/register
+// RegisterRelay handles POST /api/v1/internal/relay/register.
+//
+// On first registration the control-plane mints a VLESS UUID + Reality
+// keypair + SNI for this relay and stores them. Subsequent calls from the
+// same (address, port) pair return the same credentials — the relay restores
+// its xray config from them instead of re-negotiating crypto at every boot.
 func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) {
 	var req protocol.RelayRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -261,16 +266,32 @@ func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Generate a relay ID from address
+	// Default vless_port if not provided (old relay binaries that don't know
+	// about it yet still register a UDP-only relay; xray-subprocess is
+	// optional from the control-plane's perspective).
+	vlessPort := req.VLESSPort
+	if vlessPort == 0 {
+		vlessPort = 443
+	}
+
 	relayID := req.Address + ":" + strconv.Itoa(req.Port)
 
-	if err := h.relayRepo.Upsert(r.Context(), relayID, req.Address, req.Port, req.Capacity); err != nil {
+	creds, err := h.relayRepo.UpsertWithCredentials(
+		r.Context(), relayID, req.Address, req.Port, vlessPort, req.Capacity,
+	)
+	if err != nil {
 		h.logger.Error("register relay failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to register relay server")
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, http.StatusOK, protocol.RelayRegisterResponse{
+		VLESSUUID:         creds.VLESSUUID,
+		RealityPrivateKey: creds.RealityPrivateKey,
+		RealityPublicKey:  creds.RealityPublicKey,
+		RealityShortIDs:   creds.RealityShortIDs,
+		RealitySNI:        creds.RealitySNI,
+	})
 }
 
 func (h *InternalHandler) dummy() {

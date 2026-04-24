@@ -30,6 +30,11 @@ type Config struct {
 	RouteRecalcInterval    time.Duration
 	StaleNodeTimeout       time.Duration
 	HeartbeatExpectedInterval time.Duration
+	// OfflineNodeRetention is how long a node may stay offline before the
+	// control-plane deletes it from the database (default 30 days).
+	OfflineNodeRetention   time.Duration
+	// OfflineNodeSweepInterval is how often the deleter checks (default 24h).
+	OfflineNodeSweepInterval time.Duration
 
 	// deSEC DNS (optional — for auto-domain on exit nodes)
 	// Register free at desec.io, create a dedyn.io domain
@@ -48,9 +53,11 @@ func Load() *Config {
 		MeshCIDR:                getEnv("MESH_CIDR", "10.100.0.0/16"),
 		STUNAddr:                getEnv("STUN_ADDR", ":3478"),
 		STUNAltAddr:             getEnv("STUN_ALT_ADDR", ":3479"),
-		RouteRecalcInterval:     getDurationEnv("ROUTE_RECALC_INTERVAL", 30*time.Second),
-		StaleNodeTimeout:        getDurationEnv("STALE_NODE_TIMEOUT", 90*time.Second),
+		RouteRecalcInterval:       getDurationEnv("ROUTE_RECALC_INTERVAL", 30*time.Second),
+		StaleNodeTimeout:          getDurationEnv("STALE_NODE_TIMEOUT", 90*time.Second),
 		HeartbeatExpectedInterval: getDurationEnv("HEARTBEAT_INTERVAL", 15*time.Second),
+		OfflineNodeRetention:      getDurationEnv("OFFLINE_NODE_RETENTION", 30*24*time.Hour),
+		OfflineNodeSweepInterval:  getDurationEnv("OFFLINE_NODE_SWEEP_INTERVAL", 24*time.Hour),
 		DNSApiToken:              getEnv("DNS_API_TOKEN", ""),
 		DNSDomain:                getEnv("DNS_DOMAIN", ""),
 	}

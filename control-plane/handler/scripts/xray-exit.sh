@@ -94,7 +94,7 @@ cat > "$XRAY_CONFIG" <<EOF
         "show": false,
         "dest": "${SNI_DOMAIN}:443",
         "xver": 0,
-        "serverNames": ["${SNI_DOMAIN}", "www.${SNI_DOMAIN}"],
+        "serverNames": ["${SNI_DOMAIN}"],
         "privateKey": "${REALITY_PRIVATE_KEY}",
         "shortIds": ["${SHORT_ID}"]
       }

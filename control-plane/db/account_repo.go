@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -78,58 +79,147 @@ func NewAccountSettingsRepository(pool *pgxpool.Pool) AccountSettingsRepository 
 	return &pgAccountSettingsRepo{pool: pool}
 }
 
-func (r *pgAccountSettingsRepo) Get(ctx context.Context, accountID string) (*api.AccountSettings, error) {
+// All-columns SELECT list used by every read path here. Keeps the scan order
+// in one place so adding a column means touching this const + scanSettings.
+const settingsSelect = `account_id, vless_enabled, exit_node_id, exit_nodes,
+	routing_rules, fragment_enabled, block_ads_enabled, updated_at`
+
+// scanSettings decodes a row produced by settingsSelect into AccountSettings.
+// Handles the nullable exit_node_id and the JSONB exit_nodes column.
+func scanSettings(row pgx.Row) (*api.AccountSettings, error) {
 	var s api.AccountSettings
 	var exitNodeID *string
-	err := r.pool.QueryRow(ctx,
-		`SELECT account_id, vless_enabled, exit_node_id, updated_at FROM account_settings WHERE account_id=$1`,
+	var exitNodesRaw []byte
+	err := row.Scan(
+		&s.AccountID,
+		&s.VLESSEnabled,
+		&exitNodeID,
+		&exitNodesRaw,
+		&s.RoutingRules,
+		&s.FragmentEnabled,
+		&s.BlockAdsEnabled,
+		&s.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if exitNodeID != nil {
+		s.ExitNodeID = *exitNodeID
+	}
+	if len(exitNodesRaw) > 0 {
+		if err := json.Unmarshal(exitNodesRaw, &s.ExitNodes); err != nil {
+			return nil, fmt.Errorf("decode exit_nodes: %w", err)
+		}
+	}
+	if s.ExitNodes == nil {
+		s.ExitNodes = []api.ExitNodeConfig{}
+	}
+	return &s, nil
+}
+
+func (r *pgAccountSettingsRepo) Get(ctx context.Context, accountID string) (*api.AccountSettings, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+settingsSelect+` FROM account_settings WHERE account_id=$1`,
 		accountID,
-	).Scan(&s.AccountID, &s.VLESSEnabled, &exitNodeID, &s.UpdatedAt)
+	)
+	s, err := scanSettings(row)
 	if err == pgx.ErrNoRows {
 		return nil, api.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get account settings: %w", err)
 	}
-	if exitNodeID != nil {
-		s.ExitNodeID = *exitNodeID
-	}
-	return &s, nil
+	return s, nil
 }
 
 func (r *pgAccountSettingsRepo) Upsert(ctx context.Context, accountID string, vlessEnabled bool) (*api.AccountSettings, error) {
-	var s api.AccountSettings
-	var exitNodeID *string
-	err := r.pool.QueryRow(ctx,
+	row := r.pool.QueryRow(ctx,
 		`INSERT INTO account_settings (account_id, vless_enabled, updated_at)
 		 VALUES ($1, $2, NOW())
 		 ON CONFLICT (account_id) DO UPDATE SET vless_enabled=$2, updated_at=NOW()
-		 RETURNING account_id, vless_enabled, exit_node_id, updated_at`,
+		 RETURNING `+settingsSelect,
 		accountID, vlessEnabled,
-	).Scan(&s.AccountID, &s.VLESSEnabled, &exitNodeID, &s.UpdatedAt)
+	)
+	s, err := scanSettings(row)
 	if err != nil {
 		return nil, fmt.Errorf("upsert account settings: %w", err)
 	}
-	if exitNodeID != nil {
-		s.ExitNodeID = *exitNodeID
-	}
-	return &s, nil
+	return s, nil
 }
 
 func (r *pgAccountSettingsRepo) SetExitNode(ctx context.Context, accountID string, exitNodeID *string) (*api.AccountSettings, error) {
-	var s api.AccountSettings
-	var outExitNodeID *string
-	err := r.pool.QueryRow(ctx,
+	row := r.pool.QueryRow(ctx,
 		`UPDATE account_settings SET exit_node_id=$2, updated_at=NOW()
 		 WHERE account_id=$1
-		 RETURNING account_id, vless_enabled, exit_node_id, updated_at`,
+		 RETURNING `+settingsSelect,
 		accountID, exitNodeID,
-	).Scan(&s.AccountID, &s.VLESSEnabled, &outExitNodeID, &s.UpdatedAt)
+	)
+	s, err := scanSettings(row)
 	if err != nil {
 		return nil, fmt.Errorf("set exit node: %w", err)
 	}
-	if outExitNodeID != nil {
-		s.ExitNodeID = *outExitNodeID
+	return s, nil
+}
+
+func (r *pgAccountSettingsRepo) SetExitNodes(ctx context.Context, accountID string, nodes []api.ExitNodeConfig) (*api.AccountSettings, error) {
+	if nodes == nil {
+		nodes = []api.ExitNodeConfig{}
 	}
-	return &s, nil
+	payload, err := json.Marshal(nodes)
+	if err != nil {
+		return nil, fmt.Errorf("encode exit_nodes: %w", err)
+	}
+	row := r.pool.QueryRow(ctx,
+		`UPDATE account_settings SET exit_nodes=$2::jsonb, updated_at=NOW()
+		 WHERE account_id=$1
+		 RETURNING `+settingsSelect,
+		accountID, payload,
+	)
+	s, err := scanSettings(row)
+	if err != nil {
+		return nil, fmt.Errorf("set exit nodes: %w", err)
+	}
+	return s, nil
+}
+
+func (r *pgAccountSettingsRepo) SetRoutingRules(ctx context.Context, accountID string, rules string) (*api.AccountSettings, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE account_settings SET routing_rules=$2, updated_at=NOW()
+		 WHERE account_id=$1
+		 RETURNING `+settingsSelect,
+		accountID, rules,
+	)
+	s, err := scanSettings(row)
+	if err != nil {
+		return nil, fmt.Errorf("set routing rules: %w", err)
+	}
+	return s, nil
+}
+
+func (r *pgAccountSettingsRepo) SetFragmentEnabled(ctx context.Context, accountID string, enabled bool) (*api.AccountSettings, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE account_settings SET fragment_enabled=$2, updated_at=NOW()
+		 WHERE account_id=$1
+		 RETURNING `+settingsSelect,
+		accountID, enabled,
+	)
+	s, err := scanSettings(row)
+	if err != nil {
+		return nil, fmt.Errorf("set fragment enabled: %w", err)
+	}
+	return s, nil
+}
+
+func (r *pgAccountSettingsRepo) SetBlockAdsEnabled(ctx context.Context, accountID string, enabled bool) (*api.AccountSettings, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE account_settings SET block_ads_enabled=$2, updated_at=NOW()
+		 WHERE account_id=$1
+		 RETURNING `+settingsSelect,
+		accountID, enabled,
+	)
+	s, err := scanSettings(row)
+	if err != nil {
+		return nil, fmt.Errorf("set block ads enabled: %w", err)
+	}
+	return s, nil
 }

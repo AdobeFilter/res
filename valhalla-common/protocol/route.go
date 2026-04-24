@@ -31,8 +31,15 @@ type SettingsResponse struct {
 	Settings api.AccountSettings `json:"settings"`
 }
 
-// UpdateSettingsRequest updates account-level settings.
+// UpdateSettingsRequest updates account-level settings. Every field is a
+// pointer so the caller can push a partial patch — only non-nil fields are
+// written. ExitNodes is a whole-list replacement (the client always sends the
+// full list after any add/remove/edit).
 type UpdateSettingsRequest struct {
-	VLESSEnabled *bool   `json:"vless_enabled,omitempty"`
-	ExitNodeID   *string `json:"exit_node_id,omitempty"`
+	VLESSEnabled    *bool                `json:"vless_enabled,omitempty"`
+	ExitNodeID      *string              `json:"exit_node_id,omitempty"`
+	ExitNodes       *[]api.ExitNodeConfig `json:"exit_nodes,omitempty"`
+	RoutingRules    *string              `json:"routing_rules,omitempty"`
+	FragmentEnabled *bool                `json:"fragment_enabled,omitempty"`
+	BlockAdsEnabled *bool                `json:"block_ads_enabled,omitempty"`
 }
