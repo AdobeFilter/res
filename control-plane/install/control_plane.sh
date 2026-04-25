@@ -86,6 +86,21 @@ fi
 
 JWT_SECRET=$(cat /etc/valhalla/jwt-secret)
 
+# deSEC DNS for auto-domain on exit nodes (optional). Saved to a separate
+# env file so secrets stay out of the unit (which is world-readable) and
+# can be edited without re-running the installer.
+read -p "deSEC DNS API token (leave blank to skip auto-domain): " DNS_API_TOKEN
+DNS_DOMAIN=""
+if [ -n "$DNS_API_TOKEN" ]; then
+    read -p "deSEC DNS domain (e.g. yourname.dedyn.io): " DNS_DOMAIN
+fi
+cat > /etc/valhalla/control-plane.env <<ENV
+DNS_API_TOKEN=${DNS_API_TOKEN}
+DNS_DOMAIN=${DNS_DOMAIN}
+ENV
+chown valhalla:valhalla /etc/valhalla/control-plane.env
+chmod 600 /etc/valhalla/control-plane.env
+
 # Create systemd unit
 cat > /etc/systemd/system/valhalla-control.service << EOF
 [Unit]
@@ -101,6 +116,7 @@ ExecStart=/usr/local/bin/valhalla-control
 Restart=always
 RestartSec=5
 
+EnvironmentFile=/etc/valhalla/control-plane.env
 Environment=LISTEN_ADDR=:8443
 Environment=DATABASE_URL=postgres://valhalla:valhalla@localhost:5432/valhalla?sslmode=disable
 Environment=JWT_SECRET=${JWT_SECRET}
