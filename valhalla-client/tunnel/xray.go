@@ -168,6 +168,18 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("mesh dst addr: %w", err)
 	}
 
+	// xtls-rprx-vision is only allowed when the outbound dials directly
+	// (xray refuses it through proxySettings: "XTLS only supports TLS and
+	// REALITY directly for now"). When chaining via user-exit, we drop the
+	// flow on the inner outbound — Reality still encrypts the stream, just
+	// without the xtls splice optimization.
+	relayUser := map[string]interface{}{
+		"id":         x.relay.VLESSUUID,
+		"encryption": "none",
+	}
+	if x.exit == nil {
+		relayUser["flow"] = "xtls-rprx-vision"
+	}
 	relayOutbound := map[string]interface{}{
 		"tag":      "relay",
 		"protocol": "vless",
@@ -176,13 +188,7 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 				{
 					"address": x.relay.Address,
 					"port":    x.relay.VLESSPort,
-					"users": []map[string]interface{}{
-						{
-							"id":         x.relay.VLESSUUID,
-							"flow":       "xtls-rprx-vision",
-							"encryption": "none",
-						},
-					},
+					"users":   []map[string]interface{}{relayUser},
 				},
 			},
 		},

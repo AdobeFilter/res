@@ -197,8 +197,14 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDis
 				"settings": map[string]interface{}{
 					"clients": []map[string]interface{}{
 						{
-							"id":   uuid,
-							"flow": "xtls-rprx-vision",
+							// flow intentionally omitted: chained clients
+							// (those connecting through their own xray
+							// outbound via proxySettings) cannot use
+							// xtls-rprx-vision — xray rejects xtls flow on
+							// non-direct dials. Direct clients lose the
+							// xtls splice optimization but still get full
+							// Reality encryption, which is what matters.
+							"id": uuid,
 						},
 					},
 					"decryption": "none",
