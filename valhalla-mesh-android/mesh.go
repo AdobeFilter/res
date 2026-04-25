@@ -109,9 +109,14 @@ func StartMesh(
 		return nil, fmt.Errorf("control plane did not return relay credentials")
 	}
 
-	// Plain-VLESS port on the relay — Reality stays direct-only on :443; the
-	// chained path always uses :8444 (matches relay-node/transport/vless.go).
-	relayHostPort := net.JoinHostPort(route.Relay.Address, "8444")
+	// SOCKS5 dial target is the mesh-dispatcher *advertised* address, NOT
+	// the actual relay IP. Kotlin's xray has a "relay" outbound configured
+	// with the real relay address, and the relay's xray routes by inboundTag
+	// + this destination to its mesh dispatcher. Mirrors the Linux client's
+	// meshDstAddr constant.
+	const meshDstAddr = "127.0.0.1:9999"
+	relayHostPort := meshDstAddr
+	_ = route.Relay.Address // intentionally unused: address lives in the Kotlin xray config now
 
 	// Newer wg-go returns (tun, name, err); name is unused on Android (the
 	// caller already named the interface via VpnService.Builder).
