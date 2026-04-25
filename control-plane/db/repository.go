@@ -95,7 +95,7 @@ type RelayServerRepository interface {
 	// calls. vlessPort is the TCP port where xray will listen.
 	UpsertWithCredentials(
 		ctx context.Context,
-		id, address string,
+		address string,
 		port, vlessPort, capacity int,
 	) (*RelayCredentials, error)
 

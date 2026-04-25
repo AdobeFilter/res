@@ -181,7 +181,7 @@ func NewRelayServerRepository(pool *pgxpool.Pool) RelayServerRepository {
 
 func (r *pgRelayRepo) UpsertWithCredentials(
 	ctx context.Context,
-	id, address string,
+	address string,
 	port, vlessPort, capacity int,
 ) (*RelayCredentials, error) {
 	// Try to read existing credentials first — same (address, port) means
@@ -229,10 +229,10 @@ func (r *pgRelayRepo) UpsertWithCredentials(
 
 	_, err = r.pool.Exec(ctx,
 		`INSERT INTO relay_servers
-		   (id, address, port, vless_port, capacity, last_seen,
+		   (address, port, vless_port, capacity, last_seen,
 		    vless_uuid, reality_private_key, reality_public_key,
 		    reality_short_ids, reality_sni)
-		 VALUES ($1, $2, $3, $4, $5, NOW(), uuid_generate_v4(), $6, $7, $8, $9)
+		 VALUES ($1, $2, $3, $4, NOW(), uuid_generate_v4(), $5, $6, $7, $8)
 		 ON CONFLICT (address, port) DO UPDATE SET
 		   capacity   = EXCLUDED.capacity,
 		   vless_port = EXCLUDED.vless_port,
@@ -242,7 +242,7 @@ func (r *pgRelayRepo) UpsertWithCredentials(
 		   reality_public_key  = CASE WHEN relay_servers.reality_public_key  = '' THEN EXCLUDED.reality_public_key  ELSE relay_servers.reality_public_key  END,
 		   reality_short_ids   = CASE WHEN relay_servers.reality_short_ids   = '' THEN EXCLUDED.reality_short_ids   ELSE relay_servers.reality_short_ids   END,
 		   reality_sni         = CASE WHEN relay_servers.reality_sni         = '' THEN EXCLUDED.reality_sni         ELSE relay_servers.reality_sni         END`,
-		id, address, port, vlessPort, capacity,
+		address, port, vlessPort, capacity,
 		kp.PrivateKey, kp.PublicKey, shortID, sni,
 	)
 	if err != nil {
