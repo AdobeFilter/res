@@ -100,6 +100,12 @@ VALHALLA_SELF_IP=$INTERNAL_IP
 VALHALLA_WG_KEY=$PRIV
 ENV
 chmod 600 /etc/valhalla/client.env
+# When invoked via `sudo ... bash`, hand ownership back to the invoking user
+# so they can `source` the env without sudo. Carries the WG private key, so
+# we keep mode 600.
+if [ -n "${SUDO_USER:-}" ] && id -u "$SUDO_USER" >/dev/null 2>&1; then
+    chown "$SUDO_USER:$(id -gn "$SUDO_USER")" /etc/valhalla/client.env
+fi
 
 log "================================="
 log "Node registered:"
@@ -108,11 +114,9 @@ log "  mesh IP:    $INTERNAL_IP"
 log "  WG pubkey:  $PUB"
 log "  env saved:  /etc/valhalla/client.env"
 log ""
-log "On THIS VM (server side):"
-log "  set -a && source /etc/valhalla/client.env && set +a"
-log "  valhalla-client -mode server"
+log "On THIS VM (server side) — paste as ONE line:"
+log "  set -a && source /etc/valhalla/client.env && set +a && valhalla-client -mode server"
 log ""
 log "On the OTHER VM (client side), pass THIS node_id as -target:"
-log "  set -a && source /etc/valhalla/client.env && set +a"
-log "  valhalla-client -mode client -target $NODE_ID"
+log "  set -a && source /etc/valhalla/client.env && set +a && valhalla-client -mode client -target $NODE_ID"
 log "================================="
