@@ -13,27 +13,26 @@
 //
 // Kotlin responsibilities:
 //   - acquire VPN permission, build TUN via VpnService.Builder, detach FD
-//   - spawn xray (libv2ray) with SOCKS5 inbound + VLESS+Reality outbound to user's exit-node
-//   - call StartMesh(...) with the FD and SOCKS5 address
+//   - GET /api/v1/routes/optimal → relay endpoint + peer pubkey/IP
+//   - configure xray with SOCKS5 inbound + chained VLESS outbounds
+//     (relay → user-exit) so this AAR's SOCKS5 dial reaches the
+//     relay's mesh dispatcher through the user's exit-node
+//   - call StartMesh(...) with the FD, the peer info, and the SOCKS5 address
 //
 // Go responsibilities (this AAR):
-//   - dial control plane (through SOCKS5) for the optimal route + relay creds
-//   - dial relay :8444 (through SOCKS5) and run the mesh-frame protocol
+//   - SOCKS5-dial 127.0.0.1:9999 once, send HELLO, then run the mesh-frame
+//     protocol over that single TCP stream
 //   - run wireguard-go on the TUN FD with a custom Bind that funnels every
-//     WG packet over that single TCP stream
+//     WG packet onto that stream
 package mesh
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/net/proxy"
@@ -59,27 +58,23 @@ func Hello(name string) string {
 	return fmt.Sprintf("hello from valhalla-mesh, %s", name)
 }
 
-// StartMesh starts the mesh tunnel.
+// StartMesh starts the mesh tunnel. Kotlin is responsible for fetching the
+// route from the control-plane and configuring the xray chain — by the time
+// this is called, the SOCKS5 inbound at socksAddr already routes every
+// connection through the relay+user-exit chain.
 //
 // Args:
 //
-//	tunFD         file descriptor from VpnService.Builder.establish().detachFd()
-//	controlURL    e.g. "http://144.48.10.51:8443"
-//	token         account auth token (Bearer)
-//	selfNodeID    this device's node ID
-//	targetNodeID  peer node ID to mesh with
-//	wgPrivKeyB64  base64 WG private key (matches the pubkey registered for selfNodeID)
-//	selfIP        mesh IP assigned to this node (e.g. "10.100.0.20")
-//	socksAddr     SOCKS5 proxy "host:port" used for both control-plane HTTP and
-//	              relay TCP. Must be non-empty — Android always chains through
-//	              the Kotlin-managed xray (the relay's IP is DPI-blocked from
-//	              typical RU networks).
+//	tunFD                file descriptor from VpnService.Builder.establish().detachFd()
+//	targetPeerPubKeyB64  base64 WG pubkey of the peer (RouteResponse.dst_peer.public_key)
+//	targetPeerInternalIP mesh IP of the peer (RouteResponse.dst_peer.internal_ip)
+//	wgPrivKeyB64         base64 WG private key (matches our registered pubkey)
+//	selfIP               mesh IP assigned to this node
+//	socksAddr            SOCKS5 proxy "host:port" — Kotlin xray's mesh-chain inbound
 func StartMesh(
 	tunFD int32,
-	controlURL string,
-	token string,
-	selfNodeID string,
-	targetNodeID string,
+	targetPeerPubKeyB64 string,
+	targetPeerInternalIP string,
 	wgPrivKeyB64 string,
 	selfIP string,
 	socksAddr string,
@@ -96,30 +91,12 @@ func StartMesh(
 		return nil, fmt.Errorf("socks5 dialer is not ContextDialer")
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{DialContext: ctxDialer.DialContext},
-		Timeout:   15 * time.Second,
-	}
-
-	route, err := fetchRoute(httpClient, controlURL, token, selfNodeID, targetNodeID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch route: %w", err)
-	}
-	if route.Relay == nil {
-		return nil, fmt.Errorf("control plane did not return relay credentials")
-	}
-
-	// SOCKS5 dial target is the mesh-dispatcher *advertised* address, NOT
-	// the actual relay IP. Kotlin's xray has a "relay" outbound configured
-	// with the real relay address, and the relay's xray routes by inboundTag
-	// + this destination to its mesh dispatcher. Mirrors the Linux client's
-	// meshDstAddr constant.
+	// SOCKS5 dial target is the mesh-dispatcher advertised address — the
+	// xray chain on the Kotlin side carries this destination through
+	// user-exit to the relay's vless-plain-in inbound, which routes by
+	// inboundTag + (127.0.0.1, 9999) to the mesh dispatcher.
 	const meshDstAddr = "127.0.0.1:9999"
-	relayHostPort := meshDstAddr
-	_ = route.Relay.Address // intentionally unused: address lives in the Kotlin xray config now
 
-	// Newer wg-go returns (tun, name, err); name is unused on Android (the
-	// caller already named the interface via VpnService.Builder).
 	tunDev, _, err := tun.CreateUnmonitoredTUNFromFD(int(tunFD))
 	if err != nil {
 		return nil, fmt.Errorf("tun from fd: %w", err)
@@ -133,7 +110,7 @@ func StartMesh(
 	derivePub(&selfPub, privBytes)
 
 	bind := NewMeshBind(selfPub, func() (net.Conn, error) {
-		return ctxDialer.DialContext(context.Background(), "tcp", relayHostPort)
+		return ctxDialer.DialContext(context.Background(), "tcp", meshDstAddr)
 	})
 
 	dev := device.NewDevice(tunDev, bind, &device.Logger{
@@ -143,9 +120,9 @@ func StartMesh(
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "private_key=%s\n", hex.EncodeToString(privBytes))
-	fmt.Fprintf(&sb, "public_key=%s\n", base64ToHex(route.DstPeer.PublicKey))
-	fmt.Fprintf(&sb, "endpoint=vmesh:%s\n", base64ToHex(route.DstPeer.PublicKey))
-	fmt.Fprintf(&sb, "allowed_ip=%s/32\n", route.DstPeer.InternalIP)
+	fmt.Fprintf(&sb, "public_key=%s\n", base64ToHex(targetPeerPubKeyB64))
+	fmt.Fprintf(&sb, "endpoint=vmesh:%s\n", base64ToHex(targetPeerPubKeyB64))
+	fmt.Fprintf(&sb, "allowed_ip=%s/32\n", targetPeerInternalIP)
 	fmt.Fprintf(&sb, "persistent_keepalive_interval=25\n")
 
 	if err := dev.IpcSet(sb.String()); err != nil {
@@ -157,54 +134,11 @@ func StartMesh(
 		return nil, fmt.Errorf("wg up: %w", err)
 	}
 
+	_ = selfIP // reserved for diagnostics; the IP is already on the TUN via VpnService config
 	return &Session{dev: dev}, nil
 }
 
 // --- helpers ---
-
-type relayEndpoint struct {
-	Address          string `json:"address"`
-	VLESSPort        int    `json:"vless_port"`
-	VLESSUUID        string `json:"vless_uuid"`
-	RealityPublicKey string `json:"reality_public_key"`
-	RealitySNI       string `json:"reality_sni"`
-	RealityShortID   string `json:"reality_short_id"`
-}
-
-type peerInfo struct {
-	PublicKey  string `json:"public_key"`
-	Endpoint   string `json:"endpoint,omitempty"`
-	InternalIP string `json:"internal_ip"`
-}
-
-type routeResponse struct {
-	ConnectionType string         `json:"connection_type"`
-	DstPeer        peerInfo       `json:"dst_peer"`
-	Relay          *relayEndpoint `json:"relay,omitempty"`
-}
-
-func fetchRoute(c *http.Client, base, token, from, to string) (*routeResponse, error) {
-	u := fmt.Sprintf("%s/api/v1/routes/optimal?from=%s&to=%s", base, from, to)
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("control plane %d: %s", resp.StatusCode, string(body))
-	}
-	var rr routeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
-		return nil, err
-	}
-	return &rr, nil
-}
 
 func derivePub(out *[32]byte, priv []byte) {
 	var in [32]byte
