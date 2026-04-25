@@ -98,12 +98,12 @@ INTERNAL_IP=$(echo "$node" | jq -r .internal_ip)
 # 4. Persist env for the test client
 mkdir -p /etc/valhalla
 cat > /etc/valhalla/client.env <<ENV
-VALHALLA_CONTROL=$CONTROL
-VALHALLA_TOKEN=$TOKEN
-VALHALLA_SELF_NODE=$NODE_ID
-VALHALLA_SELF_IP=$INTERNAL_IP
-VALHALLA_WG_KEY=$PRIV
-VALHALLA_EXIT_LINK=${VALHALLA_EXIT_LINK:-}
+VALHALLA_CONTROL="$CONTROL"
+VALHALLA_TOKEN="$TOKEN"
+VALHALLA_SELF_NODE="$NODE_ID"
+VALHALLA_SELF_IP="$INTERNAL_IP"
+VALHALLA_WG_KEY="$PRIV"
+VALHALLA_EXIT_LINK="${VALHALLA_EXIT_LINK:-}"
 ENV
 chmod 600 /etc/valhalla/client.env
 # When invoked via `sudo ... bash`, hand ownership back to the invoking user
