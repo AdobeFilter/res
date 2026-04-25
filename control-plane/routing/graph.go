@@ -19,7 +19,12 @@ type Graph struct {
 }
 
 // BuildGraph constructs a weighted graph from online nodes and their metrics.
-// Every pair of online nodes gets an edge. The edge cost is the average of both endpoints' costs.
+// A direct edge is added between two nodes only when at least one has a
+// publicly reachable Endpoint — otherwise neither side can dial the other,
+// so a direct WG handshake is impossible and the route service must fall
+// through to relay. Without this check, two NAT-bound clients would always
+// resolve to ConnectionDirect, never get relay credentials, and fail to
+// connect.
 func BuildGraph(nodes []*api.NodeInfo, metrics map[string]*api.Metrics, optimizer *Optimizer) *Graph {
 	g := &Graph{
 		nodes:   make(map[string]*api.NodeInfo),
@@ -31,10 +36,12 @@ func BuildGraph(nodes []*api.NodeInfo, metrics map[string]*api.Metrics, optimize
 		g.nodes[n.ID] = n
 	}
 
-	// Create edges between all pairs of online nodes
 	for i, a := range nodes {
 		for j, b := range nodes {
 			if i >= j {
+				continue
+			}
+			if a.Endpoint == "" && b.Endpoint == "" {
 				continue
 			}
 
