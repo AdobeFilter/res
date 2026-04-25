@@ -255,9 +255,12 @@ func buildVLESSOutbound(tag string, e *ExitNode) map[string]interface{} {
 		"id":         e.UUID,
 		"encryption": "none",
 	}
-	if e.Flow != "" {
-		user["flow"] = e.Flow
-	}
+	// Intentionally omit flow even when the share-URL specifies one.
+	// xtls-rprx-vision on the outer outbound activates a splice path that
+	// breaks an inner xray protocol layer trying to write its own TLS
+	// handshake (Reality client hello never reaches the destination —
+	// inner relay sees "failed to read client hello"). Plain VLESS on the
+	// outer is enough; Reality still encrypts the wire stream.
 	return map[string]interface{}{
 		"tag":      tag,
 		"protocol": "vless",
