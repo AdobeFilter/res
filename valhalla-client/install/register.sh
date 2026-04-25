@@ -18,6 +18,11 @@ set -euo pipefail
 # Optional env:
 #   VALHALLA_CONTROL=http://144.48.10.51:8443   # default
 #   VALHALLA_NODE_NAME=<hostname>               # default = `hostname`
+#   VALHALLA_EXIT_LINK=vless://...              # user's exit-node, persisted
+#                                               # to client.env so valhalla-client
+#                                               # picks it up automatically.
+#                                               # Required when the relay's IP
+#                                               # is DPI-blocked.
 #
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/AdobeFilter/res/main/valhalla-client/install/register.sh \
@@ -98,6 +103,7 @@ VALHALLA_TOKEN=$TOKEN
 VALHALLA_SELF_NODE=$NODE_ID
 VALHALLA_SELF_IP=$INTERNAL_IP
 VALHALLA_WG_KEY=$PRIV
+VALHALLA_EXIT_LINK=${VALHALLA_EXIT_LINK:-}
 ENV
 chmod 600 /etc/valhalla/client.env
 # When invoked via `sudo ... bash`, hand ownership back to the invoking user

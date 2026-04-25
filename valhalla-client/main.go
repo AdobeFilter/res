@@ -61,6 +61,7 @@ func main() {
 		wgPrivKeyB64 = flag.String("wg-key", env("VALHALLA_WG_KEY", ""), "base64 WG private key (matches the one registered for -self)")
 		selfIP       = flag.String("self-ip", env("VALHALLA_SELF_IP", ""), "mesh IP assigned to this node by control plane")
 		xrayBin      = flag.String("xray", env("VALHALLA_XRAY", "xray"), "xray binary path")
+		exitLink     = flag.String("exit-link", env("VALHALLA_EXIT_LINK", ""), "VLESS link to user's exit-node (vless://...). When set, relay traffic is chained through it via xray proxySettings — needed when the relay's IP is DPI-blocked.")
 	)
 	flag.Parse()
 
@@ -97,8 +98,24 @@ func main() {
 		zap.String("relay", fmt.Sprintf("%s:%d", resp.Relay.Address, resp.Relay.VLESSPort)),
 		zap.String("dst_peer_ip", resp.DstPeer.InternalIP))
 
-	// Start xray subprocess: dokodemo on 127.0.0.1:10800 → VLESS+Reality → relay.
-	xc := tunnel.NewXrayClient(*xrayBin, xrayDokodemoAddr, meshDstAddr, resp.Relay, logger)
+	// Optionally chain relay traffic through the user's exit-node when the
+	// relay's IP is DPI-blocked. Parsed once up-front so a malformed link
+	// fails before we go through xray spawn.
+	var exit *tunnel.ExitNode
+	if *exitLink != "" {
+		exit, err = tunnel.ParseVLESSURL(*exitLink)
+		if err != nil {
+			logger.Fatal("parse -exit-link failed", zap.Error(err))
+		}
+		logger.Info("relay traffic chained through user exit-node",
+			zap.String("exit_host", exit.Address),
+			zap.Int("exit_port", exit.Port),
+			zap.String("exit_sni", exit.SNI))
+	}
+
+	// Start xray subprocess: dokodemo on 127.0.0.1:10800 → VLESS+Reality → relay
+	// (optionally proxied through user-exit when exit != nil).
+	xc := tunnel.NewXrayClient(*xrayBin, xrayDokodemoAddr, meshDstAddr, resp.Relay, exit, logger)
 	if err := xc.Start(ctx); err != nil {
 		logger.Fatal("xray start failed", zap.Error(err))
 	}

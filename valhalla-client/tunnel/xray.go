@@ -21,12 +21,20 @@ import (
 // inbound and a VLESS+Reality outbound pinned to the assigned relay. The
 // MeshBind then dials the dokodemo inbound to get a TCP stream that
 // xray transparently wraps in VLESS+Reality on its way to the relay.
+//
+// If exit is non-nil, the relay outbound is chained through a second
+// VLESS+Reality outbound (the user's exit-node) via xray's
+// proxySettings.tag. On the wire there is then exactly one TLS handshake
+// visible — to the exit-node's SNI — and the relay-side Reality handshake
+// rides inside that encrypted channel. Used when the relay's IP itself is
+// blacklisted by DPI.
 type XrayClient struct {
-	xrayBin       string
-	logger        *zap.Logger
-	localAddr     string // dokodemo inbound: "127.0.0.1:PORT"
-	meshDstAddr   string // destination echoed back by the relay dispatcher — must match its listen addr (e.g. 127.0.0.1:9999)
-	relay         *protocol.RelayEndpoint
+	xrayBin     string
+	logger      *zap.Logger
+	localAddr   string // dokodemo inbound: "127.0.0.1:PORT"
+	meshDstAddr string // destination echoed back by the relay dispatcher — must match its listen addr (e.g. 127.0.0.1:9999)
+	relay       *protocol.RelayEndpoint
+	exit        *ExitNode // optional; when set, relay outbound chains through it
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -37,8 +45,9 @@ type XrayClient struct {
 // NewXrayClient prepares (but does not start) an xray subprocess. localAddr
 // is the TCP host:port the MeshBind will dial; pick any free loopback port.
 // meshDstAddr is the loopback address the relay's mesh dispatcher listens
-// on (passed through in xray's VLESS CONNECT header).
-func NewXrayClient(xrayBin, localAddr, meshDstAddr string, relay *protocol.RelayEndpoint, logger *zap.Logger) *XrayClient {
+// on (passed through in xray's VLESS CONNECT header). exit may be nil for
+// direct relay access (no DPI in the way).
+func NewXrayClient(xrayBin, localAddr, meshDstAddr string, relay *protocol.RelayEndpoint, exit *ExitNode, logger *zap.Logger) *XrayClient {
 	if xrayBin == "" {
 		xrayBin = "xray"
 	}
@@ -48,6 +57,7 @@ func NewXrayClient(xrayBin, localAddr, meshDstAddr string, relay *protocol.Relay
 		localAddr:   localAddr,
 		meshDstAddr: meshDstAddr,
 		relay:       relay,
+		exit:        exit,
 	}
 }
 
@@ -158,6 +168,46 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("mesh dst addr: %w", err)
 	}
 
+	relayOutbound := map[string]interface{}{
+		"tag":      "relay",
+		"protocol": "vless",
+		"settings": map[string]interface{}{
+			"vnext": []map[string]interface{}{
+				{
+					"address": x.relay.Address,
+					"port":    x.relay.VLESSPort,
+					"users": []map[string]interface{}{
+						{
+							"id":         x.relay.VLESSUUID,
+							"flow":       "xtls-rprx-vision",
+							"encryption": "none",
+						},
+					},
+				},
+			},
+		},
+		"streamSettings": map[string]interface{}{
+			"network":  "tcp",
+			"security": "reality",
+			"realitySettings": map[string]interface{}{
+				"fingerprint": "chrome",
+				"serverName":  x.relay.RealitySNI,
+				"publicKey":   x.relay.RealityPublicKey,
+				"shortId":     x.relay.RealityShortID,
+			},
+		},
+	}
+
+	outbounds := []map[string]interface{}{relayOutbound}
+
+	// Chain through user-exit when DPI sits between us and the relay's IP.
+	// The relay outbound now dials its destination (45.x.y.z:443) THROUGH
+	// the user-exit outbound — DPI sees only one TLS to the exit-node SNI.
+	if x.exit != nil {
+		relayOutbound["proxySettings"] = map[string]interface{}{"tag": "user-exit"}
+		outbounds = append(outbounds, buildVLESSOutbound("user-exit", x.exit))
+	}
+
 	return map[string]interface{}{
 		"log": map[string]interface{}{"loglevel": "info"},
 		"inbounds": []map[string]interface{}{
@@ -173,43 +223,53 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 				},
 			},
 		},
-		"outbounds": []map[string]interface{}{
-			{
-				"tag":      "relay",
-				"protocol": "vless",
-				"settings": map[string]interface{}{
-					"vnext": []map[string]interface{}{
-						{
-							"address": x.relay.Address,
-							"port":    x.relay.VLESSPort,
-							"users": []map[string]interface{}{
-								{
-									"id":         x.relay.VLESSUUID,
-									"flow":       "xtls-rprx-vision",
-									"encryption": "none",
-								},
-							},
-						},
-					},
-				},
-				"streamSettings": map[string]interface{}{
-					"network":  "tcp",
-					"security": "reality",
-					"realitySettings": map[string]interface{}{
-						"fingerprint": "chrome",
-						"serverName":  x.relay.RealitySNI,
-						"publicKey":   x.relay.RealityPublicKey,
-						"shortId":     x.relay.RealityShortID,
-					},
-				},
-			},
-		},
+		"outbounds": outbounds,
 		"routing": map[string]interface{}{
 			"rules": []map[string]interface{}{
 				{"type": "field", "inboundTag": []string{"mesh-in"}, "outboundTag": "relay"},
 			},
 		},
 	}, nil
+}
+
+// buildVLESSOutbound produces a VLESS+Reality outbound config from an
+// ExitNode. Mirrors the shape of the relay outbound (same protocol, same
+// stream settings) so the chained pair is symmetric to xray's router.
+func buildVLESSOutbound(tag string, e *ExitNode) map[string]interface{} {
+	reality := map[string]interface{}{
+		"fingerprint": e.Fingerprint,
+		"serverName":  e.SNI,
+		"publicKey":   e.PublicKey,
+		"shortId":     e.ShortID,
+	}
+	if e.SpiderX != "" {
+		reality["spiderX"] = e.SpiderX
+	}
+	user := map[string]interface{}{
+		"id":         e.UUID,
+		"encryption": "none",
+	}
+	if e.Flow != "" {
+		user["flow"] = e.Flow
+	}
+	return map[string]interface{}{
+		"tag":      tag,
+		"protocol": "vless",
+		"settings": map[string]interface{}{
+			"vnext": []map[string]interface{}{
+				{
+					"address": e.Address,
+					"port":    e.Port,
+					"users":   []map[string]interface{}{user},
+				},
+			},
+		},
+		"streamSettings": map[string]interface{}{
+			"network":         e.Network,
+			"security":        e.Security,
+			"realitySettings": reality,
+		},
+	}
 }
 
 func splitHostPort(addr string) (string, int, error) {
