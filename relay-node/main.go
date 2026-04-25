@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 	"valhalla/relay-node/config"
+	"valhalla/relay-node/mesh"
 	"valhalla/relay-node/registration"
 	"valhalla/relay-node/relay"
 	"valhalla/relay-node/transport"
@@ -38,6 +39,16 @@ func main() {
 	go func() {
 		if err := tcpRelay.ListenAndServe(ctx, cfg.TCPListenAddr); err != nil {
 			logger.Fatal("TCP relay failed", zap.Error(err))
+		}
+	}()
+
+	// Mesh dispatcher: terminates the VLESS streams bridged here by xray
+	// and performs pubkey-keyed forwarding between peers. Runs on loopback
+	// — xray routing rules pin VLESS clients to this destination only.
+	dispatcher := mesh.New(cfg.MeshDispatchAddr, logger)
+	go func() {
+		if err := dispatcher.ListenAndServe(ctx); err != nil {
+			logger.Fatal("mesh dispatcher failed", zap.Error(err))
 		}
 	}()
 
@@ -79,6 +90,7 @@ func main() {
 				creds.RealityPublicKey,
 				creds.RealityShortIDs,
 				creds.RealitySNI,
+				cfg.MeshDispatchAddr,
 			); err != nil {
 				logger.Error("failed to start VLESS relay", zap.Error(err))
 			}

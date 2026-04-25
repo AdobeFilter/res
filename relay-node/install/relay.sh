@@ -38,7 +38,14 @@ if ! command -v xray &>/dev/null; then
     systemctl disable --now xray 2>/dev/null || true
 fi
 
-PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "")
+# Force IPv4 — clients behind IPv4-only NAT (typical RU home ISPs) can't
+# reach an IPv6 address, so a v4 PUBLIC_ADDRESS is what we want regardless
+# of whether the relay also has an IPv6 interface.
+PUBLIC_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com || curl -s -4 api.ipify.org || echo "")
+if [[ -z "$PUBLIC_IP" ]]; then
+    warn "Could not auto-detect IPv4 public address — relay will register without one."
+    warn "Set PUBLIC_ADDRESS in /etc/systemd/system/valhalla-relay.service manually."
+fi
 
 # Build binary
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

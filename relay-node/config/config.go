@@ -6,14 +6,15 @@ import (
 )
 
 type Config struct {
-	ControlPlaneURL string
-	ListenAddr      string // UDP relay listen address
-	TCPListenAddr   string // TCP fallback listen address
-	VLESSListenAddr string // VLESS+Reality listen address
-	VLESSPort       int    // parsed from VLESSListenAddr for registration
-	XrayBinary      string // path to xray binary (default: "xray" in PATH)
-	Capacity        int    // max concurrent relay sessions
-	PublicAddress   string // public IP for registration
+	ControlPlaneURL  string
+	ListenAddr       string // UDP relay listen address
+	TCPListenAddr    string // TCP fallback listen address
+	VLESSListenAddr  string // VLESS+Reality listen address
+	VLESSPort        int    // parsed from VLESSListenAddr for registration
+	XrayBinary       string // path to xray binary (default: "xray" in PATH)
+	Capacity         int    // max concurrent relay sessions
+	PublicAddress    string // public IP for registration
+	MeshDispatchAddr string // loopback addr the mesh dispatcher listens on; VLESS clients CONNECT to this as their destination
 }
 
 func Load() *Config {
@@ -24,7 +25,8 @@ func Load() *Config {
 		VLESSListenAddr: getEnv("VLESS_LISTEN_ADDR", ":443"),
 		XrayBinary:      getEnv("XRAY_BINARY", "xray"),
 		Capacity:        getIntEnv("CAPACITY", 1000),
-		PublicAddress:   getEnv("PUBLIC_ADDRESS", ""),
+		PublicAddress:    getEnv("PUBLIC_ADDRESS", ""),
+		MeshDispatchAddr: getEnv("MESH_DISPATCH_ADDR", "127.0.0.1:9999"),
 	}
 	// Extract numeric port from VLESSListenAddr (":443" -> 443).
 	if parts := splitHostPort(c.VLESSListenAddr); parts != "" {

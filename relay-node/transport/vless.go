@@ -48,7 +48,12 @@ func NewVLESSRelay(listenPort int, xrayBin string, logger *zap.Logger) *VLESSRel
 // Start spawns xray with the given credentials. Idempotent: calling Start on
 // an already-running instance returns nil. Callers should pair every Start
 // with a Stop before reconfiguring.
-func (v *VLESSRelay) Start(ctx context.Context, uuid, realityPrivKey, realityPubKey, realityShortIDs, realitySNI string) error {
+//
+// meshDispatchAddr is the loopback address the mesh dispatcher listens on
+// (e.g. "127.0.0.1:9999"). VLESS inbounds are routed ONLY to this address —
+// anything else is blackholed to keep the relay from being abused as an
+// open proxy.
+func (v *VLESSRelay) Start(ctx context.Context, uuid, realityPrivKey, realityPubKey, realityShortIDs, realitySNI, meshDispatchAddr string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -60,7 +65,7 @@ func (v *VLESSRelay) Start(ctx context.Context, uuid, realityPrivKey, realityPub
 		return errors.New("vless relay: missing credentials")
 	}
 
-	cfg := v.buildConfig(uuid, realityPrivKey, realityShortIDs, realitySNI)
+	cfg := v.buildConfig(uuid, realityPrivKey, realityShortIDs, realitySNI, meshDispatchAddr)
 	cfgJSON, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal xray config: %w", err)
@@ -171,10 +176,12 @@ func (v *VLESSRelay) pipeLog(r io.Reader, tag string) {
 	}
 }
 
-// buildConfig produces the xray JSON for Phase 1: one VLESS+Reality inbound
-// on :listenPort, one freedom outbound. No reverse-proxy routing yet — that
-// wires in when we're ready to dispatch traffic to specific mesh peers.
-func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni string) map[string]interface{} {
+// buildConfig produces the xray JSON: VLESS+Reality inbound on listenPort,
+// two outbounds (direct freedom + blackhole), and routing rules that pin
+// every VLESS-in stream to meshDispatchAddr. Any CONNECT targeting a
+// different destination falls into the blackhole, so a compromised or
+// malicious VLESS UUID can't turn this relay into an open proxy.
+func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDispatchAddr string) map[string]interface{} {
 	shortIDs := splitCSV(shortIDsCSV)
 	serverNames := []string{sni}
 	return map[string]interface{}{
@@ -211,17 +218,58 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni string) 
 		},
 		"outbounds": []map[string]interface{}{
 			{
-				"tag":      "direct",
+				"tag":      "to-mesh",
 				"protocol": "freedom",
+				"settings": map[string]interface{}{},
+			},
+			{
+				"tag":      "blocked",
+				"protocol": "blackhole",
 				"settings": map[string]interface{}{},
 			},
 		},
 		"routing": map[string]interface{}{
 			"rules": []map[string]interface{}{
-				{"type": "field", "inboundTag": []string{"vless-in"}, "outboundTag": "direct"},
+				// VLESS-in streams destined to the mesh dispatcher go through.
+				{
+					"type":        "field",
+					"inboundTag":  []string{"vless-in"},
+					"domain":      []string{"full:" + meshDispatchHost(meshDispatchAddr)},
+					"port":        meshDispatchPort(meshDispatchAddr),
+					"outboundTag": "to-mesh",
+				},
+				{
+					"type":        "field",
+					"inboundTag":  []string{"vless-in"},
+					"ip":          []string{meshDispatchHost(meshDispatchAddr) + "/32"},
+					"port":        meshDispatchPort(meshDispatchAddr),
+					"outboundTag": "to-mesh",
+				},
+				// Everything else on VLESS-in is dropped.
+				{"type": "field", "inboundTag": []string{"vless-in"}, "outboundTag": "blocked"},
 			},
 		},
 	}
+}
+
+// meshDispatchHost / meshDispatchPort split a "host:port" string. Callers
+// feed a loopback address so we don't bother with IPv6 bracket forms.
+func meshDispatchHost(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
+		}
+	}
+	return addr
+}
+
+func meshDispatchPort(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[i+1:]
+		}
+	}
+	return ""
 }
 
 func splitCSV(s string) []string {

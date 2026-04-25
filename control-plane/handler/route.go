@@ -29,14 +29,14 @@ func (h *RouteHandler) GetOptimal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, err := h.routeService.GetOptimalRoute(r.Context(), fromNodeID, toNodeID)
+	resp, err := h.routeService.GetOptimalRouteResponse(r.Context(), fromNodeID, toNodeID)
 	if err != nil {
 		h.logger.Error("get optimal route failed", zap.Error(err))
 		writeError(w, http.StatusNotFound, "no route available")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, route)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GetSTUNServers handles GET /api/v1/routes/stun-servers
