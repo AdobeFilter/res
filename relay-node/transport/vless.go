@@ -196,16 +196,7 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDis
 				"protocol": "vless",
 				"settings": map[string]interface{}{
 					"clients": []map[string]interface{}{
-						{
-							// flow intentionally omitted: chained clients
-							// (those connecting through their own xray
-							// outbound via proxySettings) cannot use
-							// xtls-rprx-vision — xray rejects xtls flow on
-							// non-direct dials. Direct clients lose the
-							// xtls splice optimization but still get full
-							// Reality encryption, which is what matters.
-							"id": uuid,
-						},
+						{"id": uuid},
 					},
 					"decryption": "none",
 				},
@@ -219,6 +210,25 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDis
 						"privateKey":  realityPrivKey,
 						"shortIds":    shortIDs,
 					},
+				},
+			},
+			// Auxiliary plain-VLESS inbound for clients that reach the relay
+			// through their own xray exit-node (outer Reality already
+			// hides this from DPI). Same UUID, no Reality on the wire —
+			// nesting Reality inside Vision-flow Reality breaks the inner
+			// hello in xray 26.x.
+			{
+				"tag":      "vless-plain-in",
+				"listen":   "0.0.0.0",
+				"port":     8444,
+				"protocol": "vless",
+				"settings": map[string]interface{}{
+					"clients":    []map[string]interface{}{{"id": uuid}},
+					"decryption": "none",
+				},
+				"streamSettings": map[string]interface{}{
+					"network":  "tcp",
+					"security": "none",
 				},
 			},
 		},
@@ -236,23 +246,23 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDis
 		},
 		"routing": map[string]interface{}{
 			"rules": []map[string]interface{}{
-				// VLESS-in streams destined to the mesh dispatcher go through.
+				// Both VLESS inbounds → mesh dispatcher only. Anything else
+				// blackholed so neither inbound can be abused as an open proxy.
 				{
 					"type":        "field",
-					"inboundTag":  []string{"vless-in"},
+					"inboundTag":  []string{"vless-in", "vless-plain-in"},
 					"domain":      []string{"full:" + meshDispatchHost(meshDispatchAddr)},
 					"port":        meshDispatchPort(meshDispatchAddr),
 					"outboundTag": "to-mesh",
 				},
 				{
 					"type":        "field",
-					"inboundTag":  []string{"vless-in"},
+					"inboundTag":  []string{"vless-in", "vless-plain-in"},
 					"ip":          []string{meshDispatchHost(meshDispatchAddr) + "/32"},
 					"port":        meshDispatchPort(meshDispatchAddr),
 					"outboundTag": "to-mesh",
 				},
-				// Everything else on VLESS-in is dropped.
-				{"type": "field", "inboundTag": []string{"vless-in"}, "outboundTag": "blocked"},
+				{"type": "field", "inboundTag": []string{"vless-in", "vless-plain-in"}, "outboundTag": "blocked"},
 			},
 		},
 	}

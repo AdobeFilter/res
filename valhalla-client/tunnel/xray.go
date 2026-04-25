@@ -177,7 +177,14 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 		"id":         x.relay.VLESSUUID,
 		"encryption": "none",
 	}
-	if x.exit == nil {
+	// The plain-VLESS port is fixed at 8444 — it sits next to the Reality
+	// :443 inbound on the same relay process. Chained clients hit the plain
+	// port over a tunnel that already provides DPI cover via the user's
+	// exit-node Reality; direct clients hit :443 with full Reality+xtls.
+	relayPort := x.relay.VLESSPort
+	if x.exit != nil {
+		relayPort = 8444
+	} else {
 		relayUser["flow"] = "xtls-rprx-vision"
 	}
 	relayOutbound := map[string]interface{}{
@@ -187,28 +194,12 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 			"vnext": []map[string]interface{}{
 				{
 					"address": x.relay.Address,
-					"port":    x.relay.VLESSPort,
+					"port":    relayPort,
 					"users":   []map[string]interface{}{relayUser},
 				},
 			},
 		},
-		"streamSettings": map[string]interface{}{
-			"network":  "tcp",
-			"security": "reality",
-			"realitySettings": map[string]interface{}{
-				"fingerprint": "chrome",
-				"serverName":  x.relay.RealitySNI,
-				"publicKey":   x.relay.RealityPublicKey,
-				"shortId":     x.relay.RealityShortID,
-				// spiderX is the URL path Reality clients use during the
-				// fallback "spider" probe. xray defaults to empty, but
-				// Reality server-side parsers expect a non-empty path
-				// during chained TLS handshakes — without it the inner
-				// client hello can come out malformed and the relay
-				// reports "failed to read client hello".
-				"spiderX": "/",
-			},
-		},
+		"streamSettings": x.relayStreamSettings(),
 	}
 
 	outbounds := []map[string]interface{}{relayOutbound}
@@ -243,6 +234,33 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 			},
 		},
 	}, nil
+}
+
+// relayStreamSettings produces the streamSettings for the relay outbound.
+// Direct (no exit-node) → VLESS+Reality on the relay's :443 inbound.
+// Chained (via exit-node) → plain VLESS over TCP on the relay's auxiliary
+// plain port. Reality nested inside another VLESS+Reality+Vision stream
+// trips Vision's splice mode and the inner client hello arrives mangled
+// at the relay ("failed to read client hello"). Switching the inner to
+// plain TCP avoids the issue entirely; the outer Reality still hides the
+// stream from DPI.
+func (x *XrayClient) relayStreamSettings() map[string]interface{} {
+	if x.exit != nil {
+		return map[string]interface{}{
+			"network":  "tcp",
+			"security": "none",
+		}
+	}
+	return map[string]interface{}{
+		"network":  "tcp",
+		"security": "reality",
+		"realitySettings": map[string]interface{}{
+			"fingerprint": "chrome",
+			"serverName":  x.relay.RealitySNI,
+			"publicKey":   x.relay.RealityPublicKey,
+			"shortId":     x.relay.RealityShortID,
+		},
+	}
 }
 
 // buildVLESSOutbound produces a VLESS+Reality outbound config from an
