@@ -106,10 +106,14 @@ func (b *MeshBind) Close() error {
 	c := b.conn
 	b.conn = nil
 	b.mu.Unlock()
+	// Closing the conn unblocks readLoop's readFrame; it sees an error
+	// and returns. We deliberately do NOT close(b.readCh) — readLoop may
+	// still be mid-send through select, and a concurrent close panics
+	// "send on closed channel". GC reclaims the channel once both the
+	// readLoop goroutine and receive() callers exit.
 	if c != nil {
 		_ = c.Close()
 	}
-	close(b.readCh)
 	return nil
 }
 
@@ -177,17 +181,25 @@ func (b *MeshBind) readLoop(c net.Conn) {
 }
 
 func (b *MeshBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-	pkt, ok := <-b.readCh
-	if !ok {
-		return 0, net.ErrClosed
+	for {
+		pkt, ok := <-b.readCh
+		if !ok {
+			return 0, net.ErrClosed
+		}
+		// After Close, readCh is no longer fed by readLoop (the conn is
+		// shut, readLoop returned). Any pending packet is stale; report
+		// closed so wireguard-go stops calling us.
+		if b.closed.Load() {
+			return 0, net.ErrClosed
+		}
+		if len(packets) == 0 || len(packets[0]) < len(pkt.data) {
+			return 0, io.ErrShortBuffer
+		}
+		copy(packets[0], pkt.data)
+		sizes[0] = len(pkt.data)
+		eps[0] = pkt.ep
+		return 1, nil
 	}
-	if len(packets) == 0 || len(packets[0]) < len(pkt.data) {
-		return 0, io.ErrShortBuffer
-	}
-	copy(packets[0], pkt.data)
-	sizes[0] = len(pkt.data)
-	eps[0] = pkt.ep
-	return 1, nil
 }
 
 // --- framing helpers, duplicated locally to avoid a cross-module dep on
