@@ -186,7 +186,7 @@ func (v *VLESSRelay) buildConfig(uuid, realityPrivKey, shortIDsCSV, sni, meshDis
 	serverNames := []string{sni}
 	return map[string]interface{}{
 		"log": map[string]interface{}{
-			"loglevel": "warning",
+			"loglevel": "info",
 		},
 		"inbounds": []map[string]interface{}{
 			{

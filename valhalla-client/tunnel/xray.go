@@ -159,7 +159,7 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"log": map[string]interface{}{"loglevel": "warning"},
+		"log": map[string]interface{}{"loglevel": "info"},
 		"inbounds": []map[string]interface{}{
 			{
 				"tag":      "mesh-in",
