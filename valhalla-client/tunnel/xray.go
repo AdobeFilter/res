@@ -200,6 +200,13 @@ func (x *XrayClient) buildConfig() (map[string]interface{}, error) {
 				"serverName":  x.relay.RealitySNI,
 				"publicKey":   x.relay.RealityPublicKey,
 				"shortId":     x.relay.RealityShortID,
+				// spiderX is the URL path Reality clients use during the
+				// fallback "spider" probe. xray defaults to empty, but
+				// Reality server-side parsers expect a non-empty path
+				// during chained TLS handshakes — without it the inner
+				// client hello can come out malformed and the relay
+				// reports "failed to read client hello".
+				"spiderX": "/",
 			},
 		},
 	}
@@ -255,12 +262,9 @@ func buildVLESSOutbound(tag string, e *ExitNode) map[string]interface{} {
 		"id":         e.UUID,
 		"encryption": "none",
 	}
-	// Intentionally omit flow even when the share-URL specifies one.
-	// xtls-rprx-vision on the outer outbound activates a splice path that
-	// breaks an inner xray protocol layer trying to write its own TLS
-	// handshake (Reality client hello never reaches the destination —
-	// inner relay sees "failed to read client hello"). Plain VLESS on the
-	// outer is enough; Reality still encrypts the wire stream.
+	if e.Flow != "" {
+		user["flow"] = e.Flow
+	}
 	return map[string]interface{}{
 		"tag":      tag,
 		"protocol": "vless",
