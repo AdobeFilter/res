@@ -41,6 +41,14 @@ func BuildGraph(nodes []*api.NodeInfo, metrics map[string]*api.Metrics, optimize
 			if i >= j {
 				continue
 			}
+			// Client↔client never gets a direct edge: that pair always
+			// routes through the relay in the MVP (one of them is almost
+			// always behind a symmetric NAT or a DPI-ed network where a
+			// plain WG handshake won't hold). This keeps client-to-exit
+			// edges for the existing internet-egress Dijkstra.
+			if a.NodeType == api.NodeTypeClient && b.NodeType == api.NodeTypeClient {
+				continue
+			}
 			if a.Endpoint == "" && b.Endpoint == "" {
 				continue
 			}
