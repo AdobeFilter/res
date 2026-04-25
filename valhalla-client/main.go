@@ -73,24 +73,19 @@ func main() {
 	if *token == "" || *selfNodeID == "" || *wgPrivKeyB64 == "" || *selfIP == "" {
 		logger.Fatal("required flags: -token, -self, -wg-key, -self-ip (env VALHALLA_*)")
 	}
-	if *mode == "client" && *targetNode == "" {
-		logger.Fatal("client mode requires -target")
+	if *targetNode == "" {
+		logger.Fatal("-target is required (the OTHER peer's node ID — same value on both VMs but mirrored)")
 	}
 
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	// In client mode we ask the control plane for a route to the target;
-	// in server mode we don't — we just want to be reachable. A server
-	// still needs SOME relay session open, though, so the client can
-	// actually hit us. Easiest: server mode also asks for a route to
-	// itself, which resolves to relay-mode (no direct path to self via
-	// public IP) and yields the same relay credentials.
-	routeTarget := *targetNode
-	if *mode == "server" {
-		routeTarget = *selfNodeID
-	}
-	resp, err := fetchRoute(ctx, *controlURL, *token, *selfNodeID, routeTarget)
+	// Both modes look up the route to the OTHER peer. Self-to-self has length-1
+	// path which Dijkstra reports as ConnectionDirect, so the control-plane
+	// never attaches relay credentials — fatal for the mesh MVP. WG also needs
+	// the peer's pubkey on both ends to handshake, so server-mode without a
+	// real -target couldn't construct an IpcSet anyway.
+	resp, err := fetchRoute(ctx, *controlURL, *token, *selfNodeID, *targetNode)
 	if err != nil {
 		logger.Fatal("route lookup failed", zap.Error(err))
 	}
