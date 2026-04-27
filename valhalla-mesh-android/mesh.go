@@ -1,29 +1,26 @@
 // Package mesh is the Android-facing entry point for the Valhalla L3 mesh.
 // gomobile binds these symbols into a Java/Kotlin AAR.
 //
-// Architecture (mirrors valhalla-client/Linux):
+// Architecture (combined service that handles BOTH peer-mesh and full-tunnel
+// exit-node internet through one VpnService — Android allows only one VPN at
+// a time, so the two paths must coexist on a single TUN):
 //
-//	WG userspace (this AAR) ──frame proto──→ TCP-conn ──┐
-//	                                                    │ via SOCKS5 from
-//	                                                    │ Kotlin-managed xray
-//	                                                    ▼
-//	                                  outer VLESS+Reality ──→ user exit-node
-//	                                                    ──→ relay :8444 plain VLESS
-//	                                                    ──→ mesh dispatcher (forward by pubkey)
+//	OS TUN (10.100.0.0/16 + 0.0.0.0/0)
+//	   ↓ raw IP packets
+//	splitter (this package)
+//	   ├─ dst in 10.100.0.0/16 → virtualTUN ─→ wg-go ─→ MeshBind ─→ SOCKS5
+//	   │                                                    Kotlin xray
+//	   │                                                    (relay-chain
+//	   │                                                     through user-exit)
+//	   │                                                    ─→ relay :8444
+//	   │                                                    ─→ mesh dispatcher
+//	   └─ everything else → tun2socks ─→ SOCKS5 ─→ Kotlin xray ─→ user-exit
 //
-// Kotlin responsibilities:
-//   - acquire VPN permission, build TUN via VpnService.Builder, detach FD
-//   - GET /api/v1/routes/optimal → relay endpoint + peer pubkey/IP
-//   - configure xray with SOCKS5 inbound + chained VLESS outbounds
-//     (relay → user-exit) so this AAR's SOCKS5 dial reaches the
-//     relay's mesh dispatcher through the user's exit-node
-//   - call StartMesh(...) with the FD, the peer info, and the SOCKS5 address
-//
-// Go responsibilities (this AAR):
-//   - SOCKS5-dial 127.0.0.1:9999 once, send HELLO, then run the mesh-frame
-//     protocol over that single TCP stream
-//   - run wireguard-go on the TUN FD with a custom Bind that funnels every
-//     WG packet onto that stream
+// Iteration 1 (this revision) plumbs the splitter + virtualTUN in front of
+// wg-go without touching the non-mesh path — non-mesh packets are dropped
+// for now. The Kotlin TUN still uses route 10.100.0.0/16 only, so nothing
+// non-mesh ever reaches us. Subsequent iterations add tun2socks (full
+// tunnel) and direct/relay auto-fallback for WG.
 package mesh
 
 import (
@@ -32,24 +29,44 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun"
 )
+
+const wgMTU = 1280
 
 // Session is the running mesh tunnel. Keep a reference in Kotlin to call Stop.
 type Session struct {
-	dev *device.Device
+	dev      *device.Device
+	meshTun  *virtualTUN
+	realTun  *os.File
+	splitter *splitter
 }
 
 // Stop tears the tunnel down. Idempotent.
 func (s *Session) Stop() {
+	if s.splitter != nil {
+		s.splitter.stop()
+		s.splitter = nil
+	}
 	if s.dev != nil {
 		s.dev.Close()
 		s.dev = nil
+	}
+	if s.meshTun != nil {
+		s.meshTun.Close()
+		s.meshTun = nil
+	}
+	if s.realTun != nil {
+		// Closing the os.File closes the underlying TUN fd — the
+		// VpnService.Builder.establish() PFD has already been detachFd'd
+		// on the Kotlin side, so this is the only owner left.
+		_ = s.realTun.Close()
+		s.realTun = nil
 	}
 }
 
@@ -58,19 +75,18 @@ func Hello(name string) string {
 	return fmt.Sprintf("hello from valhalla-mesh, %s", name)
 }
 
-// StartMesh starts the mesh tunnel. Kotlin is responsible for fetching the
-// route from the control-plane and configuring the xray chain — by the time
-// this is called, the SOCKS5 inbound at socksAddr already routes every
-// connection through the relay+user-exit chain.
+// StartMesh starts the combined tunnel. Kotlin owns route lookup + xray
+// configuration; this function just plumbs the OS TUN through the splitter
+// into wg-go (mesh) and (in future iterations) tun2socks (non-mesh).
 //
 // Args:
 //
 //	tunFD                file descriptor from VpnService.Builder.establish().detachFd()
-//	targetPeerPubKeyB64  base64 WG pubkey of the peer (RouteResponse.dst_peer.public_key)
-//	targetPeerInternalIP mesh IP of the peer (RouteResponse.dst_peer.internal_ip)
+//	targetPeerPubKeyB64  base64 WG pubkey of the peer
+//	targetPeerInternalIP mesh IP of the peer
 //	wgPrivKeyB64         base64 WG private key (matches our registered pubkey)
 //	selfIP               mesh IP assigned to this node
-//	socksAddr            SOCKS5 proxy "host:port" — Kotlin xray's mesh-chain inbound
+//	socksAddr            SOCKS5 "host:port" — Kotlin xray's mesh-chain inbound
 func StartMesh(
 	tunFD int32,
 	targetPeerPubKeyB64 string,
@@ -91,29 +107,40 @@ func StartMesh(
 		return nil, fmt.Errorf("socks5 dialer is not ContextDialer")
 	}
 
-	// SOCKS5 dial target is the mesh-dispatcher advertised address — the
+	// SOCKS5 dial target is the mesh-dispatcher advertised address. The
 	// xray chain on the Kotlin side carries this destination through
-	// user-exit to the relay's vless-plain-in inbound, which routes by
-	// inboundTag + (127.0.0.1, 9999) to the mesh dispatcher.
+	// user-exit to the relay's vless-plain-in inbound; the relay routes
+	// by inboundTag + (127.0.0.1, 9999) to its mesh dispatcher.
 	const meshDstAddr = "127.0.0.1:9999"
 
-	tunDev, _, err := tun.CreateUnmonitoredTUNFromFD(int(tunFD))
-	if err != nil {
-		return nil, fmt.Errorf("tun from fd: %w", err)
+	// We own the OS TUN fd. wg-go used to own it directly; now the
+	// splitter does, and wg-go runs on a virtualTUN backed by an in-memory
+	// channel. The virtualTUN's writeBack callback writes wg-go's output
+	// (decrypted IP packets from peers) to the same OS TUN so the app
+	// sees the response.
+	realTunFile := os.NewFile(uintptr(tunFD), "valhalla-tun")
+	if realTunFile == nil {
+		return nil, fmt.Errorf("invalid tun fd: %d", tunFD)
 	}
 
 	privBytes, err := base64.StdEncoding.DecodeString(wgPrivKeyB64)
 	if err != nil || len(privBytes) != 32 {
+		_ = realTunFile.Close()
 		return nil, fmt.Errorf("bad wg-key: must be base64 of 32 bytes")
 	}
 	var selfPub [pubkeyLen]byte
 	derivePub(&selfPub, privBytes)
 
+	meshTun := newVirtualTUN("vmesh", wgMTU, func(pkt []byte) error {
+		_, err := realTunFile.Write(pkt)
+		return err
+	})
+
 	bind := NewMeshBind(selfPub, func() (net.Conn, error) {
 		return ctxDialer.DialContext(context.Background(), "tcp", meshDstAddr)
 	})
 
-	dev := device.NewDevice(tunDev, bind, &device.Logger{
+	dev := device.NewDevice(meshTun, bind, &device.Logger{
 		Verbosef: func(format string, args ...any) {},
 		Errorf:   func(format string, args ...any) {},
 	})
@@ -127,15 +154,39 @@ func StartMesh(
 
 	if err := dev.IpcSet(sb.String()); err != nil {
 		dev.Close()
+		meshTun.Close()
+		_ = realTunFile.Close()
 		return nil, fmt.Errorf("wg ipc: %w", err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
+		meshTun.Close()
+		_ = realTunFile.Close()
 		return nil, fmt.Errorf("wg up: %w", err)
 	}
 
+	sp := &splitter{
+		realTun: realTunFile,
+		onMesh: func(pkt []byte) {
+			// virtualTUN drops on backpressure; WG retransmits.
+			meshTun.push(pkt)
+		},
+		onNonMesh: func(pkt []byte) {
+			// Iteration 1: drop. The Kotlin TUN currently routes only
+			// 10.100.0.0/16 here so this branch is never hit in practice.
+			// Iteration 2 wires this to a tun2socks forwarder via SOCKS5
+			// to xray's user-exit.
+		},
+	}
+	go sp.run()
+
 	_ = selfIP // reserved for diagnostics; the IP is already on the TUN via VpnService config
-	return &Session{dev: dev}, nil
+	return &Session{
+		dev:      dev,
+		meshTun:  meshTun,
+		realTun:  realTunFile,
+		splitter: sp,
+	}, nil
 }
 
 // --- helpers ---
