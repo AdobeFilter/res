@@ -1,9 +1,10 @@
 package mesh
 
 import (
-	"io"
 	"net/netip"
 	"sync/atomic"
+
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 // meshSubnet matches the control-plane's MESH_CIDR. Packets with destination
@@ -12,15 +13,13 @@ import (
 var meshSubnet = netip.MustParsePrefix("10.100.0.0/16")
 
 // splitter reads raw IP packets from the real OS TUN and dispatches them
-// based on destination IP. Both consumers (wg-go via virtualTUN, the non-
-// mesh forwarder) eventually write reply packets back to the real TUN via
-// their own writeBack callbacks set up by the caller.
-//
-// The splitter copies each packet because the buffer it reads into is
-// reused on the next Read; sending the same slice across a channel without
-// copying would cause data races as soon as the next Read overwrites.
+// based on destination IP. It uses the wireguard-go tun.Device interface to
+// read in batches — that path goes through Go's runtime netpoller for the
+// underlying fd, so close-from-another-goroutine and non-blocking semantics
+// work cleanly. The plain os.File-from-fd route blocks indefinitely on the
+// Android TUN fd in practice.
 type splitter struct {
-	realTun io.Reader
+	realDev tun.Device
 
 	onMesh    func([]byte)
 	onNonMesh func([]byte)
@@ -29,32 +28,46 @@ type splitter struct {
 }
 
 func (s *splitter) run() {
-	buf := make([]byte, 65536)
+	batchSize := s.realDev.BatchSize()
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	bufs := make([][]byte, batchSize)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65536)
+	}
+	sizes := make([]int, batchSize)
+
 	for {
 		if s.stopped.Load() {
 			return
 		}
-		n, err := s.realTun.Read(buf)
+		n, err := s.realDev.Read(bufs, sizes, 0)
 		if err != nil {
 			return
 		}
-		if n < 1 {
-			continue
-		}
-		dst, ok := parseDst(buf[:n])
-		if !ok {
-			continue
-		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-
-		if meshSubnet.Contains(dst) {
-			if s.onMesh != nil {
-				s.onMesh(pkt)
+		for i := 0; i < n; i++ {
+			size := sizes[i]
+			if size < 1 {
+				continue
 			}
-		} else {
-			if s.onNonMesh != nil {
-				s.onNonMesh(pkt)
+			pkt := bufs[i][:size]
+			dst, ok := parseDst(pkt)
+			if !ok {
+				continue
+			}
+			// Copy because bufs[i] is reused on the next Read.
+			cp := make([]byte, size)
+			copy(cp, pkt)
+
+			if meshSubnet.Contains(dst) {
+				if s.onMesh != nil {
+					s.onMesh(cp)
+				}
+			} else {
+				if s.onNonMesh != nil {
+					s.onNonMesh(cp)
+				}
 			}
 		}
 	}

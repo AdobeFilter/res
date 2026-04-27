@@ -29,12 +29,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 const wgMTU = 1280
@@ -43,7 +43,7 @@ const wgMTU = 1280
 type Session struct {
 	dev      *device.Device
 	meshTun  *virtualTUN
-	realTun  *os.File
+	realDev  tun.Device
 	splitter *splitter
 }
 
@@ -61,12 +61,12 @@ func (s *Session) Stop() {
 		s.meshTun.Close()
 		s.meshTun = nil
 	}
-	if s.realTun != nil {
-		// Closing the os.File closes the underlying TUN fd — the
-		// VpnService.Builder.establish() PFD has already been detachFd'd
-		// on the Kotlin side, so this is the only owner left.
-		_ = s.realTun.Close()
-		s.realTun = nil
+	if s.realDev != nil {
+		// Closing the wg-go tun.Device closes the underlying OS TUN fd.
+		// VpnService.Builder.establish()'s PFD was already detachFd'd on
+		// the Kotlin side, so we're the sole owner.
+		_ = s.realDev.Close()
+		s.realDev = nil
 	}
 }
 
@@ -113,26 +113,27 @@ func StartMesh(
 	// by inboundTag + (127.0.0.1, 9999) to its mesh dispatcher.
 	const meshDstAddr = "127.0.0.1:9999"
 
-	// We own the OS TUN fd. wg-go used to own it directly; now the
-	// splitter does, and wg-go runs on a virtualTUN backed by an in-memory
-	// channel. The virtualTUN's writeBack callback writes wg-go's output
-	// (decrypted IP packets from peers) to the same OS TUN so the app
-	// sees the response.
-	realTunFile := os.NewFile(uintptr(tunFD), "valhalla-tun")
-	if realTunFile == nil {
-		return nil, fmt.Errorf("invalid tun fd: %d", tunFD)
+	// Wrap the OS TUN fd into a wg-go tun.Device. We use this same wrapper
+	// for BOTH directions — the splitter Reads from it (outgoing app pkts)
+	// and the meshTun's writeBack Writes to it (decrypted peer pkts). The
+	// wireguard-go wrapper integrates the fd with Go's runtime netpoller,
+	// which the plain os.File path does not on Android — without this,
+	// reads block forever even after the splitter is told to stop.
+	realDev, _, err := tun.CreateUnmonitoredTUNFromFD(int(tunFD))
+	if err != nil {
+		return nil, fmt.Errorf("tun from fd: %w", err)
 	}
 
 	privBytes, err := base64.StdEncoding.DecodeString(wgPrivKeyB64)
 	if err != nil || len(privBytes) != 32 {
-		_ = realTunFile.Close()
+		_ = realDev.Close()
 		return nil, fmt.Errorf("bad wg-key: must be base64 of 32 bytes")
 	}
 	var selfPub [pubkeyLen]byte
 	derivePub(&selfPub, privBytes)
 
 	meshTun := newVirtualTUN("vmesh", wgMTU, func(pkt []byte) error {
-		_, err := realTunFile.Write(pkt)
+		_, err := realDev.Write([][]byte{pkt}, 0)
 		return err
 	})
 
@@ -155,18 +156,18 @@ func StartMesh(
 	if err := dev.IpcSet(sb.String()); err != nil {
 		dev.Close()
 		meshTun.Close()
-		_ = realTunFile.Close()
+		_ = realDev.Close()
 		return nil, fmt.Errorf("wg ipc: %w", err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
 		meshTun.Close()
-		_ = realTunFile.Close()
+		_ = realDev.Close()
 		return nil, fmt.Errorf("wg up: %w", err)
 	}
 
 	sp := &splitter{
-		realTun: realTunFile,
+		realDev: realDev,
 		onMesh: func(pkt []byte) {
 			// virtualTUN drops on backpressure; WG retransmits.
 			meshTun.push(pkt)
@@ -184,7 +185,7 @@ func StartMesh(
 	return &Session{
 		dev:      dev,
 		meshTun:  meshTun,
-		realTun:  realTunFile,
+		realDev:  realDev,
 		splitter: sp,
 	}, nil
 }
