@@ -92,6 +92,7 @@ func main() {
 	mux.Handle("DELETE /api/v1/nodes/{id}", authMw(http.HandlerFunc(nodeHandler.Delete)))
 	mux.Handle("POST /api/v1/nodes/{id}/heartbeat", authMw(http.HandlerFunc(nodeHandler.Heartbeat)))
 	mux.Handle("GET /api/v1/routes/optimal", authMw(http.HandlerFunc(routeHandler.GetOptimal)))
+	mux.Handle("GET /api/v1/routes/relay", authMw(http.HandlerFunc(routeHandler.GetRelay)))
 	mux.Handle("GET /api/v1/routes/stun-servers", authMw(http.HandlerFunc(routeHandler.GetSTUNServers)))
 	mux.Handle("GET /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.GetSettings)))
 	mux.Handle("PUT /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.UpdateSettings)))

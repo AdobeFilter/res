@@ -39,6 +39,21 @@ func (h *RouteHandler) GetOptimal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// GetRelay handles GET /api/v1/routes/relay — returns just the relay
+// credentials the client needs to bring up its mesh-chain xray, without
+// requiring a target peer. The combined VpnService calls this once at
+// startup; per-peer routes (with dst_peer info) are still fetched via
+// /routes/optimal as peers are attached.
+func (h *RouteHandler) GetRelay(w http.ResponseWriter, r *http.Request) {
+	relay, err := h.routeService.GetRelayEndpoint(r.Context())
+	if err != nil {
+		h.logger.Error("get relay endpoint failed", zap.Error(err))
+		writeError(w, http.StatusNotFound, "no relay available")
+		return
+	}
+	writeJSON(w, http.StatusOK, relay)
+}
+
 // GetSTUNServers handles GET /api/v1/routes/stun-servers
 func (h *RouteHandler) GetSTUNServers(w http.ResponseWriter, r *http.Request) {
 	servers, err := h.stunRepo.GetAll(r.Context())

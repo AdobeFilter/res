@@ -48,6 +48,25 @@ type Session struct {
 	forwarder *nonMeshForwarder
 }
 
+// AddPeer registers a mesh peer on the running wg-go device. Idempotent for
+// the same pubkey — wg-go's UAPI updates the existing entry. Each peer is
+// pinned to its mesh IP only (allowed_ip = single /32) so the splitter's
+// per-packet routing matches.
+//
+// targetPeerPubKeyB64  base64 WG pubkey of the peer (RouteResponse.dst_peer.public_key)
+// targetPeerInternalIP mesh IP of the peer (e.g. "10.100.0.20")
+func (s *Session) AddPeer(targetPeerPubKeyB64 string, targetPeerInternalIP string) error {
+	if s.dev == nil {
+		return fmt.Errorf("AddPeer: session stopped")
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "public_key=%s\n", base64ToHex(targetPeerPubKeyB64))
+	fmt.Fprintf(&sb, "endpoint=vmesh:%s\n", base64ToHex(targetPeerPubKeyB64))
+	fmt.Fprintf(&sb, "allowed_ip=%s/32\n", targetPeerInternalIP)
+	fmt.Fprintf(&sb, "persistent_keepalive_interval=25\n")
+	return s.dev.IpcSet(sb.String())
+}
+
 // Stop tears the tunnel down. Idempotent.
 func (s *Session) Stop() {
 	if s.splitter != nil {
@@ -80,28 +99,26 @@ func Hello(name string) string {
 	return fmt.Sprintf("hello from valhalla-mesh, %s", name)
 }
 
-// StartMesh starts the combined tunnel. Kotlin owns route lookup + xray
-// configuration; this function plumbs the OS TUN through the splitter into
-// wg-go (mesh-subnet packets) and gvisor netstack→SOCKS5 (everything else,
-// when exitSocksAddr is provided).
+// Start launches the combined tunnel WITHOUT any mesh peer. Internet
+// traffic flows through the user-exit immediately; mesh-IP routes are still
+// caught by the splitter but wg-go has no peers, so packets to the mesh
+// subnet are silently dropped until AddPeer is called for the corresponding
+// destination.
+//
+// Splits the previous "all-in-one" StartMesh in two so the Connect button
+// can bring up the VPN with no peer (just internet) and the Files button
+// can attach a peer dynamically without restarting the service.
 //
 // Args:
 //
-//	tunFD                file descriptor from VpnService.Builder.establish().detachFd()
-//	targetPeerPubKeyB64  base64 WG pubkey of the peer
-//	targetPeerInternalIP mesh IP of the peer
-//	wgPrivKeyB64         base64 WG private key (matches our registered pubkey)
-//	selfIP               mesh IP assigned to this node
-//	meshSocksAddr        SOCKS5 "host:port" — Kotlin xray's mesh-chain inbound
-//	                     (used by wg-go's MeshBind to dial 127.0.0.1:9999)
-//	exitSocksAddr        SOCKS5 "host:port" — Kotlin xray's user-exit inbound.
-//	                     Empty string disables non-mesh forwarding (TUN must
-//	                     then route only 10.100.0.0/16, otherwise traffic
-//	                     destined elsewhere is dropped).
-func StartMesh(
+//	tunFD          file descriptor from VpnService.Builder.establish().detachFd()
+//	wgPrivKeyB64   base64 WG private key (matches our registered pubkey)
+//	selfIP         mesh IP assigned to this node
+//	meshSocksAddr  SOCKS5 "host:port" — Kotlin xray's mesh-chain inbound
+//	exitSocksAddr  SOCKS5 "host:port" — Kotlin xray's user-exit inbound;
+//	               empty string disables non-mesh forwarding.
+func Start(
 	tunFD int32,
-	targetPeerPubKeyB64 string,
-	targetPeerInternalIP string,
 	wgPrivKeyB64 string,
 	selfIP string,
 	meshSocksAddr string,
@@ -171,12 +188,11 @@ func StartMesh(
 		Errorf:   func(format string, args ...any) {},
 	})
 
+	// Initial UAPI: just the private key. Peers are added later via
+	// Session.AddPeer; wg-go's IpcSet without replace_peers=true merges new
+	// peer blocks without disturbing existing ones.
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "private_key=%s\n", hex.EncodeToString(privBytes))
-	fmt.Fprintf(&sb, "public_key=%s\n", base64ToHex(targetPeerPubKeyB64))
-	fmt.Fprintf(&sb, "endpoint=vmesh:%s\n", base64ToHex(targetPeerPubKeyB64))
-	fmt.Fprintf(&sb, "allowed_ip=%s/32\n", targetPeerInternalIP)
-	fmt.Fprintf(&sb, "persistent_keepalive_interval=25\n")
 
 	if err := dev.IpcSet(sb.String()); err != nil {
 		dev.Close()

@@ -169,6 +169,25 @@ func (s *RouteService) GetOptimalRouteResponse(ctx context.Context, srcNodeID, d
 	return resp, nil
 }
 
+// GetRelayEndpoint returns the best relay's credentials so a client can
+// configure its xray mesh-chain at VpnService start without needing to
+// pretend a target peer first. Same data the GetOptimalRouteResponse
+// embeds when ConnectionType is relay, just without the dst_peer half.
+func (s *RouteService) GetRelayEndpoint(ctx context.Context) (*protocol.RelayEndpoint, error) {
+	relay, err := s.relays.GetBestAvailable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("no relay available: %w", err)
+	}
+	return &protocol.RelayEndpoint{
+		Address:          relay.Address,
+		VLESSPort:        relay.VLESSPort,
+		VLESSUUID:        relay.VLESSUUID,
+		RealityPublicKey: relay.RealityPublicKey,
+		RealitySNI:       relay.RealitySNI,
+		RealityShortID:   firstShortID(relay.RealityShortIDs),
+	}, nil
+}
+
 // firstShortID picks the first entry from a CSV list (the form in which the
 // DB stores Reality short IDs). Empty list → empty string, which xray treats
 // as "no short id" and still accepts.
