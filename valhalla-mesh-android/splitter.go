@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"log"
 	"net/netip"
 	"sync/atomic"
 
@@ -25,6 +26,11 @@ type splitter struct {
 	onNonMesh func([]byte)
 
 	stopped atomic.Bool
+
+	// Cheap counters for debug visibility — sampled every 64 packets so
+	// idle keepalive traffic doesn't spam the log.
+	meshCount    atomic.Uint64
+	nonMeshCount atomic.Uint64
 }
 
 func (s *splitter) run() {
@@ -61,10 +67,18 @@ func (s *splitter) run() {
 			copy(cp, pkt)
 
 			if meshSubnet.Contains(dst) {
+				n := s.meshCount.Add(1)
+				if n == 1 || n%64 == 0 {
+					log.Printf("splitter: mesh pkt #%d → %s", n, dst)
+				}
 				if s.onMesh != nil {
 					s.onMesh(cp)
 				}
 			} else {
+				n := s.nonMeshCount.Add(1)
+				if n == 1 || n%64 == 0 {
+					log.Printf("splitter: non-mesh pkt #%d → %s", n, dst)
+				}
 				if s.onNonMesh != nil {
 					s.onNonMesh(cp)
 				}

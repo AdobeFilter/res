@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync/atomic"
 
@@ -150,6 +151,7 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 	var wq waiter.Queue
 	netstackEP, errEP := req.CreateEndpoint(&wq)
 	if errEP != nil {
+		log.Printf("nonmesh tcp: CreateEndpoint failed: %v", errEP)
 		req.Complete(true)
 		return
 	}
@@ -158,13 +160,16 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 	netstackConn := gonet.NewTCPConn(&wq, netstackEP)
 	dstHost := net.IP(id.LocalAddress.AsSlice()).String()
 	dstAddr := net.JoinHostPort(dstHost, fmt.Sprint(id.LocalPort))
+	log.Printf("nonmesh tcp: SYN → %s", dstAddr)
 
 	go func() {
 		defer netstackConn.Close()
 		outConn, err := f.socksDialer.DialContext(context.Background(), "tcp", dstAddr)
 		if err != nil {
+			log.Printf("nonmesh tcp: SOCKS5 dial %s failed: %v", dstAddr, err)
 			return
 		}
+		log.Printf("nonmesh tcp: SOCKS5 ok %s", dstAddr)
 		defer outConn.Close()
 
 		done := make(chan struct{}, 2)
