@@ -41,10 +41,11 @@ const wgMTU = 1280
 
 // Session is the running mesh tunnel. Keep a reference in Kotlin to call Stop.
 type Session struct {
-	dev      *device.Device
-	meshTun  *virtualTUN
-	realDev  tun.Device
-	splitter *splitter
+	dev       *device.Device
+	meshTun   *virtualTUN
+	realDev   tun.Device
+	splitter  *splitter
+	forwarder *nonMeshForwarder
 }
 
 // Stop tears the tunnel down. Idempotent.
@@ -61,6 +62,10 @@ func (s *Session) Stop() {
 		s.meshTun.Close()
 		s.meshTun = nil
 	}
+	if s.forwarder != nil {
+		s.forwarder.close()
+		s.forwarder = nil
+	}
 	if s.realDev != nil {
 		// Closing the wg-go tun.Device closes the underlying OS TUN fd.
 		// VpnService.Builder.establish()'s PFD was already detachFd'd on
@@ -76,8 +81,9 @@ func Hello(name string) string {
 }
 
 // StartMesh starts the combined tunnel. Kotlin owns route lookup + xray
-// configuration; this function just plumbs the OS TUN through the splitter
-// into wg-go (mesh) and (in future iterations) tun2socks (non-mesh).
+// configuration; this function plumbs the OS TUN through the splitter into
+// wg-go (mesh-subnet packets) and gvisor netstack→SOCKS5 (everything else,
+// when exitSocksAddr is provided).
 //
 // Args:
 //
@@ -86,25 +92,44 @@ func Hello(name string) string {
 //	targetPeerInternalIP mesh IP of the peer
 //	wgPrivKeyB64         base64 WG private key (matches our registered pubkey)
 //	selfIP               mesh IP assigned to this node
-//	socksAddr            SOCKS5 "host:port" — Kotlin xray's mesh-chain inbound
+//	meshSocksAddr        SOCKS5 "host:port" — Kotlin xray's mesh-chain inbound
+//	                     (used by wg-go's MeshBind to dial 127.0.0.1:9999)
+//	exitSocksAddr        SOCKS5 "host:port" — Kotlin xray's user-exit inbound.
+//	                     Empty string disables non-mesh forwarding (TUN must
+//	                     then route only 10.100.0.0/16, otherwise traffic
+//	                     destined elsewhere is dropped).
 func StartMesh(
 	tunFD int32,
 	targetPeerPubKeyB64 string,
 	targetPeerInternalIP string,
 	wgPrivKeyB64 string,
 	selfIP string,
-	socksAddr string,
+	meshSocksAddr string,
+	exitSocksAddr string,
 ) (*Session, error) {
-	if socksAddr == "" {
-		return nil, fmt.Errorf("socksAddr is required (point at Kotlin xray's SOCKS5 inbound)")
+	if meshSocksAddr == "" {
+		return nil, fmt.Errorf("meshSocksAddr is required (point at Kotlin xray's mesh-chain SOCKS5 inbound)")
 	}
-	socksDialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	meshDialer, err := proxy.SOCKS5("tcp", meshSocksAddr, nil, proxy.Direct)
 	if err != nil {
-		return nil, fmt.Errorf("socks5 dialer: %w", err)
+		return nil, fmt.Errorf("mesh socks5 dialer: %w", err)
 	}
-	ctxDialer, ok := socksDialer.(proxy.ContextDialer)
+	meshCtxDialer, ok := meshDialer.(proxy.ContextDialer)
 	if !ok {
-		return nil, fmt.Errorf("socks5 dialer is not ContextDialer")
+		return nil, fmt.Errorf("mesh socks5 dialer is not ContextDialer")
+	}
+
+	var exitCtxDialer proxy.ContextDialer
+	if exitSocksAddr != "" {
+		exitDialer, err := proxy.SOCKS5("tcp", exitSocksAddr, nil, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("exit socks5 dialer: %w", err)
+		}
+		var dialerOK bool
+		exitCtxDialer, dialerOK = exitDialer.(proxy.ContextDialer)
+		if !dialerOK {
+			return nil, fmt.Errorf("exit socks5 dialer is not ContextDialer")
+		}
 	}
 
 	// SOCKS5 dial target is the mesh-dispatcher advertised address. The
@@ -138,7 +163,7 @@ func StartMesh(
 	})
 
 	bind := NewMeshBind(selfPub, func() (net.Conn, error) {
-		return ctxDialer.DialContext(context.Background(), "tcp", meshDstAddr)
+		return meshCtxDialer.DialContext(context.Background(), "tcp", meshDstAddr)
 	})
 
 	dev := device.NewDevice(meshTun, bind, &device.Logger{
@@ -166,6 +191,20 @@ func StartMesh(
 		return nil, fmt.Errorf("wg up: %w", err)
 	}
 
+	var fwd *nonMeshForwarder
+	if exitCtxDialer != nil {
+		fwd, err = newNonMeshForwarder(exitCtxDialer, wgMTU, func(pkt []byte) error {
+			_, err := realDev.Write([][]byte{pkt}, 0)
+			return err
+		})
+		if err != nil {
+			dev.Close()
+			meshTun.Close()
+			_ = realDev.Close()
+			return nil, fmt.Errorf("non-mesh forwarder: %w", err)
+		}
+	}
+
 	sp := &splitter{
 		realDev: realDev,
 		onMesh: func(pkt []byte) {
@@ -173,20 +212,22 @@ func StartMesh(
 			meshTun.push(pkt)
 		},
 		onNonMesh: func(pkt []byte) {
-			// Iteration 1: drop. The Kotlin TUN currently routes only
-			// 10.100.0.0/16 here so this branch is never hit in practice.
-			// Iteration 2 wires this to a tun2socks forwarder via SOCKS5
-			// to xray's user-exit.
+			if fwd != nil {
+				fwd.inject(pkt)
+			}
+			// else: silently drop. This is what TUN routes 10.100.0.0/16
+			// only mode delivers anyway — onNonMesh is never invoked.
 		},
 	}
 	go sp.run()
 
 	_ = selfIP // reserved for diagnostics; the IP is already on the TUN via VpnService config
 	return &Session{
-		dev:      dev,
-		meshTun:  meshTun,
-		realDev:  realDev,
-		splitter: sp,
+		dev:       dev,
+		meshTun:   meshTun,
+		realDev:   realDev,
+		splitter:  sp,
+		forwarder: fwd,
 	}, nil
 }
 
