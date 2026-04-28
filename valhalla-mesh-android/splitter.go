@@ -27,10 +27,10 @@ type splitter struct {
 
 	stopped atomic.Bool
 
-	// Cheap counters for debug visibility — sampled every 64 packets so
-	// idle keepalive traffic doesn't spam the log.
-	meshCount    atomic.Uint64
-	nonMeshCount atomic.Uint64
+	// Logged exactly once each so we can confirm the path is alive without
+	// spamming logcat under load. Errors still log unconditionally.
+	loggedFirstMesh    atomic.Bool
+	loggedFirstNonMesh atomic.Bool
 }
 
 func (s *splitter) run() {
@@ -67,17 +67,15 @@ func (s *splitter) run() {
 			copy(cp, pkt)
 
 			if meshSubnet.Contains(dst) {
-				n := s.meshCount.Add(1)
-				if n == 1 || n%64 == 0 {
-					log.Printf("splitter: mesh pkt #%d → %s", n, dst)
+				if s.loggedFirstMesh.CompareAndSwap(false, true) {
+					log.Printf("splitter: first mesh pkt → %s", dst)
 				}
 				if s.onMesh != nil {
 					s.onMesh(cp)
 				}
 			} else {
-				n := s.nonMeshCount.Add(1)
-				if n == 1 || n%64 == 0 {
-					log.Printf("splitter: non-mesh pkt #%d → %s", n, dst)
+				if s.loggedFirstNonMesh.CompareAndSwap(false, true) {
+					log.Printf("splitter: first non-mesh pkt → %s", dst)
 				}
 				if s.onNonMesh != nil {
 					s.onNonMesh(cp)

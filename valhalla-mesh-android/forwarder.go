@@ -163,7 +163,6 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 	netstackConn := gonet.NewTCPConn(&wq, netstackEP)
 	dstHost := net.IP(id.LocalAddress.AsSlice()).String()
 	dstAddr := net.JoinHostPort(dstHost, fmt.Sprint(id.LocalPort))
-	log.Printf("nonmesh tcp: SYN → %s", dstAddr)
 
 	go func() {
 		defer netstackConn.Close()
@@ -172,7 +171,6 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 			log.Printf("nonmesh tcp: SOCKS5 dial %s failed: %v", dstAddr, err)
 			return
 		}
-		log.Printf("nonmesh tcp: SOCKS5 ok %s", dstAddr)
 		defer outConn.Close()
 
 		done := make(chan struct{}, 2)
@@ -213,8 +211,6 @@ func (f *nonMeshForwarder) acceptUDP(req *udp.ForwarderRequest) bool {
 		return false
 	}
 	dstIP := net.IP(id.LocalAddress.AsSlice())
-	dstAddr := net.JoinHostPort(dstIP.String(), "53")
-	log.Printf("nonmesh udp53: accept → %s", dstAddr)
 
 	var wq waiter.Queue
 	netstackEP, errEP := req.CreateEndpoint(&wq)
