@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/proxy"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -190,12 +191,97 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 	}()
 }
 
-// acceptUDP returns false to signal "not handled" — gvisor's default
-// behavior is to drop the datagram. Real UDP forwarding (SOCKS5 UDP
-// ASSOCIATE) is iter 2.1; for now apps that need UDP outside the mesh
-// fail their UDP flows, but DoH-capable apps still resolve and connect
-// via TCP.
+// acceptUDP handles each UDP "connection" gvisor extracts. We special-case
+// destination port 53 (DNS) and forward as DNS-over-TCP via the SOCKS5
+// proxy: open TCP to dst:53 through xray's user-exit, send each UDP
+// query length-prefixed, receive each TCP response and unwrap back to
+// UDP via the netstack.
+//
+// Other UDP (QUIC, NTP, mDNS, …) is currently dropped — implementing
+// general SOCKS5 UDP ASSOCIATE requires xray's exit to support UDP-over-
+// VLESS, which Vision-flow user-exits don't. iter 2.2 will tackle that.
 func (f *nonMeshForwarder) acceptUDP(req *udp.ForwarderRequest) bool {
-	_ = req
-	return false
+	id := req.ID()
+	if id.LocalPort != 53 {
+		// Drop. gvisor will silently discard.
+		return false
+	}
+	dstAddr := net.JoinHostPort(net.IP(id.LocalAddress.AsSlice()).String(), "53")
+	log.Printf("nonmesh udp53: accept → %s", dstAddr)
+
+	var wq waiter.Queue
+	netstackEP, errEP := req.CreateEndpoint(&wq)
+	if errEP != nil {
+		log.Printf("nonmesh udp53: CreateEndpoint failed: %v", errEP)
+		return true
+	}
+	netstackConn := gonet.NewUDPConn(&wq, netstackEP)
+
+	go f.proxyDNSUDPOverTCP(netstackConn, dstAddr)
+	return true
+}
+
+// proxyDNSUDPOverTCP shuttles datagrams between a netstack UDP "conn"
+// (per-flow handle gvisor gives us) and a TCP-DNS connection through
+// SOCKS5. RFC 1035 §4.2.2 defines DNS over TCP: a 2-byte big-endian
+// length prefix followed by the DNS message bytes.
+//
+// Behavior model: each outgoing UDP datagram triggers a fresh TCP
+// query; we don't persist the TCP connection across datagrams. This
+// is suboptimal for DoT keep-alive but vastly simpler and works for
+// every name resolver. Loop terminates when the netstack conn closes
+// (idle timeout from gvisor's UDP forwarder).
+func (f *nonMeshForwarder) proxyDNSUDPOverTCP(nsConn net.Conn, dstAddr string) {
+	defer nsConn.Close()
+	buf := make([]byte, 4096)
+	_ = nsConn.SetReadDeadline(time.Time{})
+	for {
+		n, err := nsConn.Read(buf)
+		if err != nil {
+			return
+		}
+		query := make([]byte, n)
+		copy(query, buf[:n])
+		go func(q []byte) {
+			resp, err := f.dnsQueryOverTCP(q, dstAddr)
+			if err != nil {
+				log.Printf("nonmesh udp53: dns-over-tcp %s failed: %v", dstAddr, err)
+				return
+			}
+			_, _ = nsConn.Write(resp)
+		}(query)
+	}
+}
+
+func (f *nonMeshForwarder) dnsQueryOverTCP(query []byte, dstAddr string) ([]byte, error) {
+	out, err := f.socksDialer.DialContext(context.Background(), "tcp", dstAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	defer out.Close()
+	_ = out.SetDeadline(time.Now().Add(8 * time.Second))
+
+	var hdr [2]byte
+	hdr[0] = byte(len(query) >> 8)
+	hdr[1] = byte(len(query))
+	if _, err := out.Write(hdr[:]); err != nil {
+		return nil, err
+	}
+	if _, err := out.Write(query); err != nil {
+		return nil, err
+	}
+
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(out, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+	if respLen <= 0 || respLen > 65535 {
+		return nil, fmt.Errorf("bad dns-tcp length: %d", respLen)
+	}
+	resp := make([]byte, respLen)
+	if _, err := io.ReadFull(out, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
