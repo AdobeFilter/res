@@ -46,11 +46,12 @@ type nonMeshForwarder struct {
 	stack       *stack.Stack
 	ep          *channel.Endpoint
 	socksDialer proxy.ContextDialer
+	protector   SocketProtector
 	writeBack   func([]byte) error
 	closed      atomic.Bool
 }
 
-func newNonMeshForwarder(socksDialer proxy.ContextDialer, mtu int, writeBack func([]byte) error) (*nonMeshForwarder, error) {
+func newNonMeshForwarder(socksDialer proxy.ContextDialer, protector SocketProtector, mtu int, writeBack func([]byte) error) (*nonMeshForwarder, error) {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
@@ -80,6 +81,7 @@ func newNonMeshForwarder(socksDialer proxy.ContextDialer, mtu int, writeBack fun
 		stack:       s,
 		ep:          ep,
 		socksDialer: socksDialer,
+		protector:   protector,
 		writeBack:   writeBack,
 	}
 
@@ -191,22 +193,27 @@ func (f *nonMeshForwarder) acceptTCP(req *tcp.ForwarderRequest) {
 	}()
 }
 
-// acceptUDP handles each UDP "connection" gvisor extracts. We special-case
-// destination port 53 (DNS) and forward as DNS-over-TCP via the SOCKS5
-// proxy: open TCP to dst:53 through xray's user-exit, send each UDP
-// query length-prefixed, receive each TCP response and unwrap back to
-// UDP via the netstack.
+// acceptUDP handles each UDP "connection" gvisor extracts. DNS (port 53)
+// is forwarded as DIRECT UDP via a kernel-protected socket — bypasses our
+// own TUN at the kernel layer (VpnService.protect) and goes straight out
+// the device's underlying network. This sidesteps user-exit servers that
+// block outbound port 53 (a common VPS DNS-spam mitigation), which the
+// previous DNS-over-TCP-via-SOCKS5 approach hit.
 //
-// Other UDP (QUIC, NTP, mDNS, …) is currently dropped — implementing
-// general SOCKS5 UDP ASSOCIATE requires xray's exit to support UDP-over-
-// VLESS, which Vision-flow user-exits don't. iter 2.2 will tackle that.
+// Other UDP (QUIC, NTP, mDNS, …) is dropped — full proxying via the
+// user-exit needs UDP-over-VLESS support that Vision-flow xray outbounds
+// don't have. iter 2.2 may add a separate freedom-outbound path for them.
 func (f *nonMeshForwarder) acceptUDP(req *udp.ForwarderRequest) bool {
 	id := req.ID()
 	if id.LocalPort != 53 {
-		// Drop. gvisor will silently discard.
 		return false
 	}
-	dstAddr := net.JoinHostPort(net.IP(id.LocalAddress.AsSlice()).String(), "53")
+	if f.protector == nil {
+		log.Printf("nonmesh udp53: drop — no protector wired up")
+		return false
+	}
+	dstIP := net.IP(id.LocalAddress.AsSlice())
+	dstAddr := net.JoinHostPort(dstIP.String(), "53")
 	log.Printf("nonmesh udp53: accept → %s", dstAddr)
 
 	var wq waiter.Queue
@@ -217,71 +224,83 @@ func (f *nonMeshForwarder) acceptUDP(req *udp.ForwarderRequest) bool {
 	}
 	netstackConn := gonet.NewUDPConn(&wq, netstackEP)
 
-	go f.proxyDNSUDPOverTCP(netstackConn, dstAddr)
+	go f.proxyDNSDirect(netstackConn, dstIP)
 	return true
 }
 
-// proxyDNSUDPOverTCP shuttles datagrams between a netstack UDP "conn"
-// (per-flow handle gvisor gives us) and a TCP-DNS connection through
-// SOCKS5. RFC 1035 §4.2.2 defines DNS over TCP: a 2-byte big-endian
-// length prefix followed by the DNS message bytes.
-//
-// Behavior model: each outgoing UDP datagram triggers a fresh TCP
-// query; we don't persist the TCP connection across datagrams. This
-// is suboptimal for DoT keep-alive but vastly simpler and works for
-// every name resolver. Loop terminates when the netstack conn closes
-// (idle timeout from gvisor's UDP forwarder).
-func (f *nonMeshForwarder) proxyDNSUDPOverTCP(nsConn net.Conn, dstAddr string) {
+// proxyDNSDirect ferries each UDP datagram between the netstack and a
+// real protected UDP socket dialed straight at the DNS server's IP. The
+// socket bypasses the VpnService TUN entirely thanks to
+// VpnService.protect(fd) called via the SocketProtector before connect.
+func (f *nonMeshForwarder) proxyDNSDirect(nsConn net.Conn, dstIP net.IP) {
 	defer nsConn.Close()
+
+	udpConn, err := f.openProtectedUDP4()
+	if err != nil {
+		log.Printf("nonmesh udp53: open protected udp failed: %v", err)
+		return
+	}
+	defer udpConn.Close()
+
+	dst := &net.UDPAddr{IP: dstIP, Port: 53}
+
+	// Reader: pull replies off the protected socket, push them at gvisor.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, _, err := udpConn.ReadFromUDP(buf)
+			if err != nil {
+				_ = nsConn.Close()
+				return
+			}
+			if _, err := nsConn.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Writer: pull queries from gvisor, send them out the protected socket.
 	buf := make([]byte, 4096)
-	_ = nsConn.SetReadDeadline(time.Time{})
 	for {
 		n, err := nsConn.Read(buf)
 		if err != nil {
 			return
 		}
-		query := make([]byte, n)
-		copy(query, buf[:n])
-		go func(q []byte) {
-			resp, err := f.dnsQueryOverTCP(q, dstAddr)
-			if err != nil {
-				log.Printf("nonmesh udp53: dns-over-tcp %s failed: %v", dstAddr, err)
-				return
-			}
-			_, _ = nsConn.Write(resp)
-		}(query)
+		if _, err := udpConn.WriteToUDP(buf[:n], dst); err != nil {
+			log.Printf("nonmesh udp53: write %s failed: %v", dst, err)
+			return
+		}
 	}
 }
 
-func (f *nonMeshForwarder) dnsQueryOverTCP(query []byte, dstAddr string) ([]byte, error) {
-	out, err := f.socksDialer.DialContext(context.Background(), "tcp", dstAddr)
+// openProtectedUDP4 opens a UDP4 socket on an ephemeral port, calls the
+// Android side's VpnService.protect on its fd, and returns the conn.
+// Without protect, the socket would be subject to VPN routing and form
+// a packet loop with our own splitter.
+func (f *nonMeshForwarder) openProtectedUDP4() (*net.UDPConn, error) {
+	uc, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
-	}
-	defer out.Close()
-	_ = out.SetDeadline(time.Now().Add(8 * time.Second))
-
-	var hdr [2]byte
-	hdr[0] = byte(len(query) >> 8)
-	hdr[1] = byte(len(query))
-	if _, err := out.Write(hdr[:]); err != nil {
 		return nil, err
 	}
-	if _, err := out.Write(query); err != nil {
+	rc, err := uc.SyscallConn()
+	if err != nil {
+		uc.Close()
 		return nil, err
 	}
-
-	var lenBuf [2]byte
-	if _, err := io.ReadFull(out, lenBuf[:]); err != nil {
-		return nil, err
+	var protectErr error
+	ctlErr := rc.Control(func(fd uintptr) {
+		if !f.protector.Protect(int(fd)) {
+			protectErr = fmt.Errorf("VpnService.protect(%d) returned false", fd)
+		}
+	})
+	if ctlErr != nil {
+		uc.Close()
+		return nil, ctlErr
 	}
-	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
-	if respLen <= 0 || respLen > 65535 {
-		return nil, fmt.Errorf("bad dns-tcp length: %d", respLen)
+	if protectErr != nil {
+		uc.Close()
+		return nil, protectErr
 	}
-	resp := make([]byte, respLen)
-	if _, err := io.ReadFull(out, resp); err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return uc, nil
 }

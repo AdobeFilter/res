@@ -39,6 +39,15 @@ import (
 
 const wgMTU = 1280
 
+// SocketProtector lets the Android side mark sockets we open in this AAR
+// (e.g., the direct UDP socket for DNS) so the kernel routes them OUTSIDE
+// the VpnService TUN. Without this we'd have a packet-loop the moment the
+// TUN catches 0.0.0.0/0. Same shape as libv2ray.VpnProtector, declared
+// here so the mesh package doesn't have a hard dep on libv2ray.
+type SocketProtector interface {
+	Protect(fd int) bool
+}
+
 // Session is the running mesh tunnel. Keep a reference in Kotlin to call Stop.
 type Session struct {
 	dev       *device.Device
@@ -123,6 +132,7 @@ func Start(
 	selfIP string,
 	meshSocksAddr string,
 	exitSocksAddr string,
+	protector SocketProtector,
 ) (*Session, error) {
 	if meshSocksAddr == "" {
 		return nil, fmt.Errorf("meshSocksAddr is required (point at Kotlin xray's mesh-chain SOCKS5 inbound)")
@@ -209,7 +219,7 @@ func Start(
 
 	var fwd *nonMeshForwarder
 	if exitCtxDialer != nil {
-		fwd, err = newNonMeshForwarder(exitCtxDialer, wgMTU, func(pkt []byte) error {
+		fwd, err = newNonMeshForwarder(exitCtxDialer, protector, wgMTU, func(pkt []byte) error {
 			_, err := realDev.Write([][]byte{pkt}, 0)
 			return err
 		})
