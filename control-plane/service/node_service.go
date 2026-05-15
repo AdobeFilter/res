@@ -48,54 +48,75 @@ func NewNodeService(
 // fan-out on free tier.
 const maxDevicesPerAccount = 20
 
-// RegisterNode creates or re-registers a node. With antifraudEnabled=true:
-//   1. A device_id can be linked to only ONE account at a time (rejected with
-//      ErrDeviceAlreadyLinked otherwise).
-//   2. An account may have at most maxDevicesPerAccount linked devices.
+// RegisterNode creates, re-registers, or migrates a node. Invariant: there
+// is at most one row in nodes per device_id (ghost rows from earlier test
+// runs are cleaned up on every register).
 //
-// With antifraudEnabled=false (test/dogfooding mode), rule (1) is skipped:
-// the same phone can register under multiple accounts. The device-limit rule
-// still applies.
+// With antifraudEnabled=true:
+//   - device_id linked to another account → ErrDeviceAlreadyLinked (409)
+//   - at most maxDevicesPerAccount per account → ErrDeviceLimitReached
 //
-// In both modes, if device_id matches an existing node for THIS account,
-// the existing node is re-registered (idempotent on app reinstall —
-// ANDROID_ID survives uninstall on Android 8+).
+// With antifraudEnabled=false (test/dogfooding mode):
+//   - cross-account register silently MIGRATES the existing row (UPDATE
+//     account_id, name, pubkey, status). The phone "follows" the user.
+//   - any other ghost rows for this device_id are deleted.
+//
+// In both modes, same-account re-register is idempotent (handles app
+// reinstall — ANDROID_ID survives on Android 8+).
 func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req protocol.NodeRegisterRequest) (*protocol.NodeRegisterResponse, error) {
 	if req.DeviceID != "" {
-		if s.antifraudEnabled {
-			owner, err := s.nodes.FindByDeviceIDGlobal(ctx, req.DeviceID)
-			if err == nil && owner != nil && owner.AccountID != accountID {
+		existing, _ := s.nodes.FindByDeviceIDGlobal(ctx, req.DeviceID)
+		if existing != nil {
+			crossAccount := existing.AccountID != accountID
+			if crossAccount && s.antifraudEnabled {
 				s.logger.Warn("device_id collision across accounts",
 					zap.String("device_id", req.DeviceID),
-					zap.String("owner_account", owner.AccountID),
+					zap.String("owner_account", existing.AccountID),
 					zap.String("attempting_account", accountID))
 				return nil, api.ErrDeviceAlreadyLinked
 			}
-		}
 
-		// Idempotent re-register on the same account.
-		existing, err := s.nodes.GetByDeviceID(ctx, accountID, req.DeviceID)
-		if err == nil && existing != nil {
+			// Test-mode migration OR same-account re-register: rewrite the
+			// row in place. UpdateReregister also sets account_id.
+			existing.AccountID = accountID
 			existing.Name = req.Name
 			existing.PublicKey = req.PublicKey
 			existing.OS = req.OS
 			existing.Status = api.NodeStatusOnline
 			if err := s.nodes.UpdateReregister(ctx, existing); err != nil {
 				s.logger.Warn("failed to update existing node", zap.Error(err))
+				return nil, fmt.Errorf("update node: %w", err)
+			}
+
+			// Sweep ghost rows for the same device_id (only possible in test
+			// mode where the global unique index was dropped). Quiet best-effort.
+			if removed, err := s.nodes.DeleteOtherByDeviceID(ctx, req.DeviceID, existing.ID); err == nil && removed > 0 {
+				s.logger.Info("cleaned up ghost device rows",
+					zap.String("device_id", req.DeviceID),
+					zap.Int64("removed", removed))
+			}
+
+			if crossAccount {
+				s.logger.Info("migrated device to new account",
+					zap.String("node_id", existing.ID),
+					zap.String("device_id", req.DeviceID),
+					zap.String("new_account", accountID))
 			} else {
 				s.logger.Info("re-registered existing node",
 					zap.String("node_id", existing.ID),
 					zap.String("device_id", req.DeviceID))
-				peers, _ := s.getPeers(ctx, existing.ID)
-				return &protocol.NodeRegisterResponse{
-					NodeID:     existing.ID,
-					InternalIP: existing.InternalIP,
-					Peers:      peers,
-				}, nil
 			}
+
+			peers, _ := s.getPeers(ctx, existing.ID)
+			return &protocol.NodeRegisterResponse{
+				NodeID:     existing.ID,
+				InternalIP: existing.InternalIP,
+				Peers:      peers,
+			}, nil
 		}
 
-		// New device for this account → enforce the per-account limit.
+		// No prior row for this device anywhere → fresh registration, enforce
+		// the per-account device limit.
 		count, err := s.nodes.CountDevicesByAccount(ctx, accountID)
 		if err != nil {
 			return nil, fmt.Errorf("count devices: %w", err)

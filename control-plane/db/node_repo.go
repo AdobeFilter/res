@@ -42,8 +42,13 @@ func (r *pgNodeRepo) GetByDeviceID(ctx context.Context, accountID, deviceID stri
 func (r *pgNodeRepo) FindByDeviceIDGlobal(ctx context.Context, deviceID string) (*api.NodeInfo, error) {
 	var n api.NodeInfo
 	var osStr, endpoint, natType, intIP, sharedFolder, lanIP *string
+	// ORDER BY last_seen DESC NULLS LAST, created_at DESC — when ghost rows
+	// pile up in test mode, prefer the most recently active one.
 	err := r.pool.QueryRow(ctx,
-		`SELECT `+nodeColumns+` FROM nodes WHERE device_id=$1`, deviceID,
+		`SELECT `+nodeColumns+` FROM nodes
+		 WHERE device_id=$1
+		 ORDER BY last_seen DESC NULLS LAST, created_at DESC
+		 LIMIT 1`, deviceID,
 	).Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
 		&endpoint, &natType, &intIP, &n.Status,
 		&n.SortOrder, &sharedFolder, &lanIP, &n.LastSeen, &n.CreatedAt)
@@ -55,6 +60,17 @@ func (r *pgNodeRepo) FindByDeviceIDGlobal(ctx context.Context, deviceID string) 
 	}
 	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder, lanIP)
 	return &n, nil
+}
+
+func (r *pgNodeRepo) DeleteOtherByDeviceID(ctx context.Context, deviceID, keepNodeID string) (int64, error) {
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM nodes WHERE device_id=$1 AND id<>$2`,
+		deviceID, keepNodeID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete ghost nodes by device_id: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *pgNodeRepo) CountDevicesByAccount(ctx context.Context, accountID string) (int, error) {
@@ -70,9 +86,12 @@ func (r *pgNodeRepo) CountDevicesByAccount(ctx context.Context, accountID string
 }
 
 func (r *pgNodeRepo) UpdateReregister(ctx context.Context, node *api.NodeInfo) error {
+	// Also updates account_id so this method doubles as a "migrate this device
+	// to a different account" call in test mode. For same-account re-register
+	// the account_id assignment is a no-op.
 	_, err := r.pool.Exec(ctx,
-		`UPDATE nodes SET name=$2, public_key=$3, os=$4, status=$5, last_seen=NOW() WHERE id=$1`,
-		node.ID, node.Name, node.PublicKey, nullString(node.OS), node.Status,
+		`UPDATE nodes SET account_id=$2, name=$3, public_key=$4, os=$5, status=$6, last_seen=NOW() WHERE id=$1`,
+		node.ID, node.AccountID, node.Name, node.PublicKey, nullString(node.OS), node.Status,
 	)
 	return err
 }
