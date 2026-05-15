@@ -67,7 +67,7 @@ if ! id valhalla &>/dev/null; then
     log "System user 'valhalla' created"
 fi
 mkdir -p "${VALHALLA_BIN}" "${VALHALLA_ETC}" "${VALHALLA_BACKUPS}"
-chown -R valhalla:valhalla "${VALHALLA_ROOT}"
+chown valhalla:valhalla "${VALHALLA_ROOT}" "${VALHALLA_BIN}" "${VALHALLA_ETC}" "${VALHALLA_BACKUPS}"
 chmod 750 "${VALHALLA_ETC}" "${VALHALLA_BACKUPS}"
 
 # JWT secret (preserved across re-installs)
@@ -139,7 +139,7 @@ fi
 # Build binary
 log "Building control-plane from ${SRC_DIR}..."
 cd "${SRC_DIR}"
-/usr/local/go/bin/go build -o "${VALHALLA_BIN}/valhalla-control" .
+/usr/local/go/bin/go build -buildvcs=false -o "${VALHALLA_BIN}/valhalla-control" .
 chmod 755 "${VALHALLA_BIN}/valhalla-control"
 chown valhalla:valhalla "${VALHALLA_BIN}/valhalla-control"
 log "Binary: ${VALHALLA_BIN}/valhalla-control"
