@@ -35,6 +35,13 @@ type Config struct {
 	OfflineNodeRetention   time.Duration
 	// OfflineNodeSweepInterval is how often the deleter checks (default 24h).
 	OfflineNodeSweepInterval time.Duration
+
+	// AntifraudEnabled gates the global device_id check: when true, a device
+	// already linked to another account is rejected with 409 on register.
+	// Defaults to false so dogfooding on the developer's own phone doesn't
+	// lock them out when switching test accounts. Flipping to true also
+	// requires running migration 010 to restore the global unique index.
+	AntifraudEnabled bool
 }
 
 func Load() *Config {
@@ -53,6 +60,7 @@ func Load() *Config {
 		HeartbeatExpectedInterval: getDurationEnv("HEARTBEAT_INTERVAL", 15*time.Second),
 		OfflineNodeRetention:      getDurationEnv("OFFLINE_NODE_RETENTION", 30*24*time.Hour),
 		OfflineNodeSweepInterval:  getDurationEnv("OFFLINE_NODE_SWEEP_INTERVAL", 24*time.Hour),
+		AntifraudEnabled:          getBoolEnv("ANTIFRAUD_ENABLED", false),
 	}
 }
 
@@ -68,6 +76,20 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 		if secs, err := strconv.Atoi(val); err == nil {
 			return time.Duration(secs) * time.Second
 		}
+	}
+	return fallback
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return fallback
+	}
+	switch val {
+	case "1", "true", "TRUE", "True", "yes":
+		return true
+	case "0", "false", "FALSE", "False", "no":
+		return false
 	}
 	return fallback
 }

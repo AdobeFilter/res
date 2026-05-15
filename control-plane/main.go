@@ -53,7 +53,7 @@ func main() {
 	tokenMgr := crypto.NewTokenManager(cfg.JWTSecret, cfg.TokenExpiry)
 
 	// Services
-	nodeService := service.NewNodeService(nodeRepo, metricsRepo, settingsRepo, stunRepo, ipAlloc, routeRepo, logger)
+	nodeService := service.NewNodeService(nodeRepo, metricsRepo, settingsRepo, stunRepo, ipAlloc, routeRepo, cfg.AntifraudEnabled, logger)
 	routeService := service.NewRouteService(nodeRepo, metricsRepo, routeRepo, relayRepo, logger)
 
 	// Handlers

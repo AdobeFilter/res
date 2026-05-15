@@ -128,6 +128,11 @@ LISTEN_ADDR=:8443
 DATABASE_URL=postgres://valhalla:${DB_PW}@localhost:5432/valhalla?sslmode=disable
 JWT_SECRET=${JWT_SECRET}
 MESH_CIDR=10.100.0.0/16
+# Antifraud: when true, a device_id linked to another account is rejected.
+# Disabled by default so dogfooding doesn't lock the dev's own phone out
+# while switching test accounts. Flip to true (and apply migration 010)
+# before public launch.
+ANTIFRAUD_ENABLED=false
 ENV
     chown valhalla:valhalla "${ENV_FILE}"
     chmod 600 "${ENV_FILE}"

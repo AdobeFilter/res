@@ -11,13 +11,14 @@ import (
 )
 
 type NodeService struct {
-	nodes       db.NodeRepository
-	metrics     db.MetricsRepository
-	settings    db.AccountSettingsRepository
-	stunServers db.STUNServerRepository
-	ipAlloc     db.IPAllocator
-	routes      db.RouteRepository
-	logger      *zap.Logger
+	nodes            db.NodeRepository
+	metrics          db.MetricsRepository
+	settings         db.AccountSettingsRepository
+	stunServers      db.STUNServerRepository
+	ipAlloc          db.IPAllocator
+	routes           db.RouteRepository
+	antifraudEnabled bool
+	logger           *zap.Logger
 }
 
 func NewNodeService(
@@ -27,16 +28,18 @@ func NewNodeService(
 	stunServers db.STUNServerRepository,
 	ipAlloc db.IPAllocator,
 	routes db.RouteRepository,
+	antifraudEnabled bool,
 	logger *zap.Logger,
 ) *NodeService {
 	return &NodeService{
-		nodes:       nodes,
-		metrics:     metrics,
-		settings:    settings,
-		stunServers: stunServers,
-		ipAlloc:     ipAlloc,
-		routes:      routes,
-		logger:      logger,
+		nodes:            nodes,
+		metrics:          metrics,
+		settings:         settings,
+		stunServers:      stunServers,
+		ipAlloc:          ipAlloc,
+		routes:           routes,
+		antifraudEnabled: antifraudEnabled,
+		logger:           logger,
 	}
 }
 
@@ -45,26 +48,34 @@ func NewNodeService(
 // fan-out on free tier.
 const maxDevicesPerAccount = 20
 
-// RegisterNode creates or re-registers a node. Enforces two antifraud rules
-// against the supplied device_id:
-//   1. A device_id can be linked to only ONE account at a time (global
-//      uniqueness, also enforced by the DB index from migration 008).
+// RegisterNode creates or re-registers a node. With antifraudEnabled=true:
+//   1. A device_id can be linked to only ONE account at a time (rejected with
+//      ErrDeviceAlreadyLinked otherwise).
 //   2. An account may have at most maxDevicesPerAccount linked devices.
 //
-// If device_id matches an existing node for THIS account, the existing node
-// is re-registered (idempotent on app reinstall — ANDROID_ID survives).
+// With antifraudEnabled=false (test/dogfooding mode), rule (1) is skipped:
+// the same phone can register under multiple accounts. The device-limit rule
+// still applies.
+//
+// In both modes, if device_id matches an existing node for THIS account,
+// the existing node is re-registered (idempotent on app reinstall —
+// ANDROID_ID survives uninstall on Android 8+).
 func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req protocol.NodeRegisterRequest) (*protocol.NodeRegisterResponse, error) {
 	if req.DeviceID != "" {
-		existing, err := s.nodes.FindByDeviceIDGlobal(ctx, req.DeviceID)
-		if err == nil && existing != nil {
-			if existing.AccountID != accountID {
+		if s.antifraudEnabled {
+			owner, err := s.nodes.FindByDeviceIDGlobal(ctx, req.DeviceID)
+			if err == nil && owner != nil && owner.AccountID != accountID {
 				s.logger.Warn("device_id collision across accounts",
 					zap.String("device_id", req.DeviceID),
-					zap.String("owner_account", existing.AccountID),
+					zap.String("owner_account", owner.AccountID),
 					zap.String("attempting_account", accountID))
 				return nil, api.ErrDeviceAlreadyLinked
 			}
-			// Same account, same device → idempotent re-register
+		}
+
+		// Idempotent re-register on the same account.
+		existing, err := s.nodes.GetByDeviceID(ctx, accountID, req.DeviceID)
+		if err == nil && existing != nil {
 			existing.Name = req.Name
 			existing.PublicKey = req.PublicKey
 			existing.OS = req.OS
