@@ -2,7 +2,12 @@
 set -euo pipefail
 
 # Valhalla Control Plane Install Script
-# Installs Go, PostgreSQL, builds the control-plane binary, configures systemd
+# Installs everything under /opt/valhalla, sets up systemd, removes source tree on completion.
+# Expected workflow:
+#   mkdir -p /opt/valhalla && cd /opt/valhalla
+#   git clone https://github.com/AdobeFilter/res.git
+#   cd res/control-plane/install
+#   bash control_plane.sh
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,19 +18,27 @@ log() { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
-# Check root
+VALHALLA_ROOT=/opt/valhalla
+VALHALLA_BIN="${VALHALLA_ROOT}/bin"
+VALHALLA_ETC="${VALHALLA_ROOT}/etc"
+VALHALLA_BACKUPS="${VALHALLA_ROOT}/backups"
+
 [[ $EUID -ne 0 ]] && error "This script must be run as root"
 
-# Detect OS
 if ! grep -qi 'debian\|ubuntu' /etc/os-release 2>/dev/null; then
     warn "This script is designed for Debian/Ubuntu. Proceeding anyway..."
 fi
 
+# Locate Go source root (script lives in <repo>/control-plane/install/)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[[ -f "${SRC_DIR}/main.go" ]] || error "main.go not found in ${SRC_DIR}"
+
 log "Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq curl wget git build-essential
+apt-get install -y -qq curl wget git build-essential gnupg openssl
 
-# Install Go 1.22+
+# Go 1.22+
 GO_VERSION="1.22.5"
 if ! command -v go &>/dev/null || [[ $(go version | grep -oP 'go\K[0-9]+\.[0-9]+') < "1.22" ]]; then
     log "Installing Go ${GO_VERSION}..."
@@ -35,74 +48,109 @@ if ! command -v go &>/dev/null || [[ $(go version | grep -oP 'go\K[0-9]+\.[0-9]+
     rm /tmp/go.tar.gz
     echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh
     export PATH=$PATH:/usr/local/go/bin
-    log "Go $(go version) installed"
+    log "Go installed: $(/usr/local/go/bin/go version)"
 else
     log "Go already installed: $(go version)"
 fi
 
-# Install PostgreSQL 16
+# PostgreSQL 16
 if ! command -v psql &>/dev/null; then
-    log "Installing PostgreSQL 16..."
+    log "Installing PostgreSQL..."
     apt-get install -y -qq postgresql postgresql-contrib
     systemctl enable postgresql
     systemctl start postgresql
-    log "PostgreSQL installed and started"
-else
-    log "PostgreSQL already installed"
 fi
 
-# Create database and user
-log "Setting up database..."
-sudo -u postgres psql -c "CREATE USER valhalla WITH PASSWORD 'valhalla';" 2>/dev/null || true
-sudo -u postgres psql -c "CREATE DATABASE valhalla OWNER valhalla;" 2>/dev/null || true
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE valhalla TO valhalla;" 2>/dev/null || true
-log "Database 'valhalla' ready"
-
-# Create system user
+# System user + directories
 if ! id valhalla &>/dev/null; then
     useradd -r -s /bin/false valhalla
     log "System user 'valhalla' created"
 fi
+mkdir -p "${VALHALLA_BIN}" "${VALHALLA_ETC}" "${VALHALLA_BACKUPS}"
+chown -R valhalla:valhalla "${VALHALLA_ROOT}"
+chmod 750 "${VALHALLA_ETC}" "${VALHALLA_BACKUPS}"
 
-# Create directories
-mkdir -p /etc/valhalla /var/log/valhalla
-chown valhalla:valhalla /var/log/valhalla
+# JWT secret (preserved across re-installs)
+JWT_FILE="${VALHALLA_ETC}/jwt-secret"
+if [[ ! -f "${JWT_FILE}" ]]; then
+    openssl rand -hex 32 > "${JWT_FILE}"
+    chmod 600 "${JWT_FILE}"
+    chown valhalla:valhalla "${JWT_FILE}"
+    log "JWT secret generated"
+else
+    log "Existing JWT secret kept"
+fi
+JWT_SECRET=$(cat "${JWT_FILE}")
+
+# Env file with secrets (preserved across re-installs)
+ENV_FILE="${VALHALLA_ETC}/control-plane.env"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo
+    log "Configuring secrets (will be saved to ${ENV_FILE})"
+
+    # DB password: prompt; empty -> random 32-hex
+    read -s -p "PostgreSQL password for user 'valhalla' (Enter to auto-generate): " DB_PW
+    echo
+    if [[ -z "${DB_PW}" ]]; then
+        DB_PW=$(openssl rand -hex 16)
+        warn "Generated DB password: ${DB_PW}"
+        warn "WRITE IT DOWN — it will not be shown again."
+    fi
+
+    # Apply password to PG (create or alter)
+    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='valhalla'" | grep -q 1; then
+        sudo -u postgres psql -c "ALTER USER valhalla WITH PASSWORD '${DB_PW}';" >/dev/null
+    else
+        sudo -u postgres psql -c "CREATE USER valhalla WITH PASSWORD '${DB_PW}';" >/dev/null
+    fi
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='valhalla'" | grep -q 1 \
+        || sudo -u postgres psql -c "CREATE DATABASE valhalla OWNER valhalla;" >/dev/null
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE valhalla TO valhalla;" >/dev/null
+
+    # Backup encryption passphrase
+    echo
+    log "Backups are encrypted with a passphrase you choose."
+    log "WRITE IT DOWN — without it, backups cannot be restored on another server."
+    read -s -p "Backup encryption passphrase (Enter to auto-generate): " BACKUP_PASS
+    echo
+    if [[ -z "${BACKUP_PASS}" ]]; then
+        BACKUP_PASS=$(openssl rand -base64 24)
+        warn "Generated backup passphrase: ${BACKUP_PASS}"
+        warn "WRITE IT DOWN — it will not be shown again."
+    fi
+    echo -n "${BACKUP_PASS}" > "${VALHALLA_ETC}/backup-passphrase"
+    chmod 600 "${VALHALLA_ETC}/backup-passphrase"
+    chown valhalla:valhalla "${VALHALLA_ETC}/backup-passphrase"
+
+    umask 077
+    cat > "${ENV_FILE}" <<ENV
+LISTEN_ADDR=:8443
+DATABASE_URL=postgres://valhalla:${DB_PW}@localhost:5432/valhalla?sslmode=disable
+JWT_SECRET=${JWT_SECRET}
+MESH_CIDR=10.100.0.0/16
+ENV
+    chown valhalla:valhalla "${ENV_FILE}"
+    chmod 600 "${ENV_FILE}"
+    log "Env file written"
+else
+    log "Existing ${ENV_FILE} kept — DB password and backup passphrase preserved"
+fi
 
 # Build binary
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-log "Building control-plane from ${SCRIPT_DIR}..."
-cd "$SCRIPT_DIR"
-/usr/local/go/bin/go build -o /usr/local/bin/valhalla-control .
-chmod +x /usr/local/bin/valhalla-control
-log "Binary built: /usr/local/bin/valhalla-control"
+log "Building control-plane from ${SRC_DIR}..."
+cd "${SRC_DIR}"
+/usr/local/go/bin/go build -o "${VALHALLA_BIN}/valhalla-control" .
+chmod 755 "${VALHALLA_BIN}/valhalla-control"
+chown valhalla:valhalla "${VALHALLA_BIN}/valhalla-control"
+log "Binary: ${VALHALLA_BIN}/valhalla-control"
 
-# Generate JWT secret if not exists
-if [ ! -f /etc/valhalla/jwt-secret ]; then
-    openssl rand -hex 32 > /etc/valhalla/jwt-secret
-    chmod 600 /etc/valhalla/jwt-secret
-    chown valhalla:valhalla /etc/valhalla/jwt-secret
-    log "JWT secret generated"
-fi
+# Install backup/restore scripts
+install -m 750 -o valhalla -g valhalla "${SCRIPT_DIR}/backup.sh" "${VALHALLA_BIN}/backup.sh"
+install -m 750 -o root -g root "${SCRIPT_DIR}/restore.sh" "${VALHALLA_BIN}/restore.sh"
+log "backup.sh and restore.sh installed in ${VALHALLA_BIN}"
 
-JWT_SECRET=$(cat /etc/valhalla/jwt-secret)
-
-# deSEC DNS for auto-domain on exit nodes (optional). Saved to a separate
-# env file so secrets stay out of the unit (which is world-readable) and
-# can be edited without re-running the installer.
-read -p "deSEC DNS API token (leave blank to skip auto-domain): " DNS_API_TOKEN
-DNS_DOMAIN=""
-if [ -n "$DNS_API_TOKEN" ]; then
-    read -p "deSEC DNS domain (e.g. yourname.dedyn.io): " DNS_DOMAIN
-fi
-cat > /etc/valhalla/control-plane.env <<ENV
-DNS_API_TOKEN=${DNS_API_TOKEN}
-DNS_DOMAIN=${DNS_DOMAIN}
-ENV
-chown valhalla:valhalla /etc/valhalla/control-plane.env
-chmod 600 /etc/valhalla/control-plane.env
-
-# Create systemd unit
-cat > /etc/systemd/system/valhalla-control.service << EOF
+# systemd unit for control-plane
+cat > /etc/systemd/system/valhalla-control.service <<EOF
 [Unit]
 Description=Valhalla Control Plane
 After=network.target postgresql.service
@@ -112,16 +160,10 @@ Requires=postgresql.service
 Type=simple
 User=valhalla
 Group=valhalla
-ExecStart=/usr/local/bin/valhalla-control
+EnvironmentFile=${ENV_FILE}
+ExecStart=${VALHALLA_BIN}/valhalla-control
 Restart=always
 RestartSec=5
-
-EnvironmentFile=/etc/valhalla/control-plane.env
-Environment=LISTEN_ADDR=:8443
-Environment=DATABASE_URL=postgres://valhalla:valhalla@localhost:5432/valhalla?sslmode=disable
-Environment=JWT_SECRET=${JWT_SECRET}
-Environment=MESH_CIDR=10.100.0.0/16
-
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=valhalla-control
@@ -130,20 +172,56 @@ SyslogIdentifier=valhalla-control
 WantedBy=multi-user.target
 EOF
 
-# Enable and start
+# systemd unit + timer for daily backup
+cat > /etc/systemd/system/valhalla-backup.service <<EOF
+[Unit]
+Description=Valhalla Control Plane Backup
+After=postgresql.service valhalla-control.service
+
+[Service]
+Type=oneshot
+User=valhalla
+Group=valhalla
+ExecStart=${VALHALLA_BIN}/backup.sh
+EOF
+
+cat > /etc/systemd/system/valhalla-backup.timer <<EOF
+[Unit]
+Description=Daily Valhalla Backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable valhalla-control
-systemctl start valhalla-control
+systemctl enable valhalla-control valhalla-backup.timer
+systemctl restart valhalla-control
+systemctl start valhalla-backup.timer
 
 # Firewall
 if command -v ufw &>/dev/null; then
-    ufw allow 8443/tcp
-    log "Firewall: port 8443/tcp allowed"
+    ufw allow 8443/tcp >/dev/null
+    log "Firewall: 8443/tcp allowed"
+fi
+
+# Clean up source tree (the user clones into /opt/valhalla/res)
+if [[ -d /opt/valhalla/res && "${SRC_DIR}" == /opt/valhalla/res/* ]]; then
+    log "Removing source tree /opt/valhalla/res"
+    cd /
+    rm -rf /opt/valhalla/res
 fi
 
 log "=================================="
 log "Valhalla Control Plane installed!"
-log "Service: systemctl status valhalla-control"
-log "Logs:    journalctl -u valhalla-control -f"
-log "API:     http://$(hostname -I | awk '{print $1}'):8443"
+log "Service:  systemctl status valhalla-control"
+log "Logs:     journalctl -u valhalla-control -f"
+log "Backups:  ${VALHALLA_BACKUPS} (daily timer enabled)"
+log "Manual:   ${VALHALLA_BIN}/backup.sh"
+log "Restore:  sudo ${VALHALLA_BIN}/restore.sh <backup.tar.gz.gpg>"
+log "API:      http://$(hostname -I | awk '{print $1}'):8443"
 log "=================================="

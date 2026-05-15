@@ -35,11 +35,6 @@ type Config struct {
 	OfflineNodeRetention   time.Duration
 	// OfflineNodeSweepInterval is how often the deleter checks (default 24h).
 	OfflineNodeSweepInterval time.Duration
-
-	// deSEC DNS (optional — for auto-domain on exit nodes)
-	// Register free at desec.io, create a dedyn.io domain
-	DNSApiToken string // deSEC API token
-	DNSDomain   string // e.g. "valhalla.dedyn.io"
 }
 
 func Load() *Config {
@@ -58,8 +53,6 @@ func Load() *Config {
 		HeartbeatExpectedInterval: getDurationEnv("HEARTBEAT_INTERVAL", 15*time.Second),
 		OfflineNodeRetention:      getDurationEnv("OFFLINE_NODE_RETENTION", 30*24*time.Hour),
 		OfflineNodeSweepInterval:  getDurationEnv("OFFLINE_NODE_SWEEP_INTERVAL", 24*time.Hour),
-		DNSApiToken:              getEnv("DNS_API_TOKEN", ""),
-		DNSDomain:                getEnv("DNS_DOMAIN", ""),
 	}
 }
 
