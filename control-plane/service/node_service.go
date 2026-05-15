@@ -40,14 +40,31 @@ func NewNodeService(
 	}
 }
 
-// RegisterNode creates or re-registers a node. If device_id matches an existing node
-// for this account, the existing node is updated instead of creating a duplicate.
+// maxDevicesPerAccount caps how many devices (nodes with device_id) one
+// account can have linked. Prevents account-sharing at scale and bounds
+// fan-out on free tier.
+const maxDevicesPerAccount = 20
+
+// RegisterNode creates or re-registers a node. Enforces two antifraud rules
+// against the supplied device_id:
+//   1. A device_id can be linked to only ONE account at a time (global
+//      uniqueness, also enforced by the DB index from migration 008).
+//   2. An account may have at most maxDevicesPerAccount linked devices.
+//
+// If device_id matches an existing node for THIS account, the existing node
+// is re-registered (idempotent on app reinstall — ANDROID_ID survives).
 func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req protocol.NodeRegisterRequest) (*protocol.NodeRegisterResponse, error) {
-	// Try to find existing node by device_id
 	if req.DeviceID != "" {
-		existing, err := s.nodes.GetByDeviceID(ctx, accountID, req.DeviceID)
+		existing, err := s.nodes.FindByDeviceIDGlobal(ctx, req.DeviceID)
 		if err == nil && existing != nil {
-			// Update existing node
+			if existing.AccountID != accountID {
+				s.logger.Warn("device_id collision across accounts",
+					zap.String("device_id", req.DeviceID),
+					zap.String("owner_account", existing.AccountID),
+					zap.String("attempting_account", accountID))
+				return nil, api.ErrDeviceAlreadyLinked
+			}
+			// Same account, same device → idempotent re-register
 			existing.Name = req.Name
 			existing.PublicKey = req.PublicKey
 			existing.OS = req.OS
@@ -65,6 +82,15 @@ func (s *NodeService) RegisterNode(ctx context.Context, accountID string, req pr
 					Peers:      peers,
 				}, nil
 			}
+		}
+
+		// New device for this account → enforce the per-account limit.
+		count, err := s.nodes.CountDevicesByAccount(ctx, accountID)
+		if err != nil {
+			return nil, fmt.Errorf("count devices: %w", err)
+		}
+		if count >= maxDevicesPerAccount {
+			return nil, api.ErrDeviceLimitReached
 		}
 	}
 

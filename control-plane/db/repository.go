@@ -30,6 +30,12 @@ type NodeRepository interface {
 	Create(ctx context.Context, node *api.NodeInfo) error
 	GetByID(ctx context.Context, id string) (*api.NodeInfo, error)
 	GetByDeviceID(ctx context.Context, accountID, deviceID string) (*api.NodeInfo, error)
+	// FindByDeviceIDGlobal locates a node by device_id without account scoping.
+	// Used by antifraud to detect when a device tries to register under a new account.
+	FindByDeviceIDGlobal(ctx context.Context, deviceID string) (*api.NodeInfo, error)
+	// CountDevicesByAccount returns how many nodes with device_id IS NOT NULL
+	// belong to the given account. Used to enforce the per-account device limit.
+	CountDevicesByAccount(ctx context.Context, accountID string) (int, error)
 	GetByAccountID(ctx context.Context, accountID string) ([]*api.NodeInfo, error)
 	UpdateReregister(ctx context.Context, node *api.NodeInfo) error
 	GetOnlineByType(ctx context.Context, nodeType api.NodeType) ([]*api.NodeInfo, error)

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -44,6 +45,14 @@ func (h *NodeHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.nodeService.RegisterNode(r.Context(), accountID, req)
 	if err != nil {
+		switch {
+		case errors.Is(err, api.ErrDeviceAlreadyLinked):
+			writeError(w, http.StatusConflict, "this device is already linked to another account")
+			return
+		case errors.Is(err, api.ErrDeviceLimitReached):
+			writeError(w, http.StatusConflict, "device limit reached (max 20 per account)")
+			return
+		}
 		h.logger.Error("register node failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to register node")
 		return

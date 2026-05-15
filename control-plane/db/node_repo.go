@@ -39,6 +39,36 @@ func (r *pgNodeRepo) GetByDeviceID(ctx context.Context, accountID, deviceID stri
 	return &n, nil
 }
 
+func (r *pgNodeRepo) FindByDeviceIDGlobal(ctx context.Context, deviceID string) (*api.NodeInfo, error) {
+	var n api.NodeInfo
+	var osStr, endpoint, natType, intIP, sharedFolder, lanIP *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT `+nodeColumns+` FROM nodes WHERE device_id=$1`, deviceID,
+	).Scan(&n.ID, &n.AccountID, &n.Name, &n.NodeType, &osStr, &n.PublicKey,
+		&endpoint, &natType, &intIP, &n.Status,
+		&n.SortOrder, &sharedFolder, &lanIP, &n.LastSeen, &n.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, api.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find node by device_id (global): %w", err)
+	}
+	applyScanHelper(&n, osStr, endpoint, natType, intIP, sharedFolder, lanIP)
+	return &n, nil
+}
+
+func (r *pgNodeRepo) CountDevicesByAccount(ctx context.Context, accountID string) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM nodes WHERE account_id=$1 AND device_id IS NOT NULL`,
+		accountID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count devices for account: %w", err)
+	}
+	return count, nil
+}
+
 func (r *pgNodeRepo) UpdateReregister(ctx context.Context, node *api.NodeInfo) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE nodes SET name=$2, public_key=$3, os=$4, status=$5, last_seen=NOW() WHERE id=$1`,

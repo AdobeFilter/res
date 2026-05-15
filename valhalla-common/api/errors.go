@@ -16,6 +16,8 @@ var (
 	ErrTokenExpired      = errors.New("token expired")
 	ErrInvalidToken      = errors.New("invalid token")
 	ErrAccountDisabled   = errors.New("account disabled")
+	ErrDeviceAlreadyLinked = errors.New("device already linked to another account")
+	ErrDeviceLimitReached  = errors.New("device limit reached")
 )
 
 // APIError is a structured error returned by the REST API.
