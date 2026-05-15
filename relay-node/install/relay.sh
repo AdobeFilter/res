@@ -2,6 +2,12 @@
 set -euo pipefail
 
 # Valhalla Relay Node Install Script
+# Installs everything under /opt/relay, sets up systemd, removes source tree on completion.
+# Expected workflow:
+#   mkdir -p /opt/relay && cd /opt/relay
+#   git clone https://github.com/AdobeFilter/res.git
+#   cd res/relay-node/install
+#   bash relay.sh
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,31 +18,59 @@ log() { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
+RELAY_ROOT=/opt/relay
+RELAY_BIN="${RELAY_ROOT}/bin"
+RELAY_ETC="${RELAY_ROOT}/etc"
+
 [[ $EUID -ne 0 ]] && error "This script must be run as root"
 
-# Install Go if needed
+if ! grep -qi 'debian\|ubuntu' /etc/os-release 2>/dev/null; then
+    warn "This script is designed for Debian/Ubuntu. Proceeding anyway..."
+fi
+
+# Locate Go source root (script lives in <repo>/relay-node/install/)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[[ -f "${SRC_DIR}/main.go" ]] || error "main.go not found in ${SRC_DIR}"
+
+log "Installing dependencies..."
+apt-get update -qq
+apt-get install -y -qq curl wget git build-essential
+
+# Go 1.22+
 GO_VERSION="1.22.5"
-if ! command -v go &>/dev/null; then
+if ! command -v go &>/dev/null || [[ $(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+') < "1.22" ]]; then
     log "Installing Go ${GO_VERSION}..."
-    apt-get update -qq
-    apt-get install -y -qq wget
     wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
     rm -rf /usr/local/go
     tar -C /usr/local -xzf /tmp/go.tar.gz
     rm /tmp/go.tar.gz
+    echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh
     export PATH=$PATH:/usr/local/go/bin
+    log "Go installed: $(/usr/local/go/bin/go version)"
+else
+    log "Go already installed: $(go version)"
 fi
 
-# Install Xray (needed for VLESS+Reality subprocess)
+# Xray — relay-node spawns it as a subprocess for VLESS+Reality.
 if ! command -v xray &>/dev/null; then
     log "Installing Xray..."
-    apt-get install -y -qq curl unzip
+    apt-get install -y -qq unzip
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     log "Xray installed: $(xray version | head -1)"
-    # The installer also creates a systemd unit that we don't want — our
-    # relay-node spawns xray with its own config, not the system one.
+    # The installer creates a systemd unit we don't want — relay-node spawns
+    # xray with its own config, not the system one.
     systemctl disable --now xray 2>/dev/null || true
 fi
+
+# System user + directories
+if ! id relay &>/dev/null; then
+    useradd -r -s /bin/false relay
+    log "System user 'relay' created"
+fi
+mkdir -p "${RELAY_BIN}" "${RELAY_ETC}"
+chown relay:relay "${RELAY_ROOT}" "${RELAY_BIN}" "${RELAY_ETC}"
+chmod 750 "${RELAY_ETC}"
 
 # Force IPv4 — clients behind IPv4-only NAT (typical RU home ISPs) can't
 # reach an IPv6 address, so a v4 PUBLIC_ADDRESS is what we want regardless
@@ -44,25 +78,57 @@ fi
 PUBLIC_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com || curl -s -4 api.ipify.org || echo "")
 if [[ -z "$PUBLIC_IP" ]]; then
     warn "Could not auto-detect IPv4 public address — relay will register without one."
-    warn "Set PUBLIC_ADDRESS in /etc/systemd/system/valhalla-relay.service manually."
+    warn "Set PUBLIC_ADDRESS in ${RELAY_ETC}/relay.env manually."
 fi
 
+# Env file (preserved across re-installs, same pattern as control_plane.sh)
+ENV_FILE="${RELAY_ETC}/relay.env"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo
+    log "Configuring relay (will be saved to ${ENV_FILE})"
+
+    read -p "Control Plane URL [http://localhost:8443]: " CONTROL_PLANE_URL
+    CONTROL_PLANE_URL=${CONTROL_PLANE_URL:-http://localhost:8443}
+
+    read -p "Max relay sessions [1000]: " CAPACITY
+    CAPACITY=${CAPACITY:-1000}
+
+    read -p "VLESS+Reality listen port [8444]: " VLESS_PORT
+    VLESS_PORT=${VLESS_PORT:-8444}
+
+    umask 077
+    cat > "${ENV_FILE}" <<ENV
+LISTEN_ADDR=:51821
+TCP_LISTEN_ADDR=:51822
+VLESS_LISTEN_ADDR=:${VLESS_PORT}
+XRAY_BINARY=/usr/local/bin/xray
+CONTROL_PLANE_URL=${CONTROL_PLANE_URL}
+PUBLIC_ADDRESS=${PUBLIC_IP}
+CAPACITY=${CAPACITY}
+ENV
+    chown relay:relay "${ENV_FILE}"
+    chmod 600 "${ENV_FILE}"
+    log "Env file written"
+else
+    log "Existing ${ENV_FILE} kept"
+fi
+
+# Re-read VLESS port from env so the firewall rule matches whatever is actually in use.
+VLESS_PORT=$(grep -oP 'VLESS_LISTEN_ADDR=:\K[0-9]+' "${ENV_FILE}" || echo "8444")
+
 # Build binary
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-log "Building relay node from ${SCRIPT_DIR}..."
-cd "$SCRIPT_DIR"
-/usr/local/go/bin/go build -o /usr/local/bin/valhalla-relay .
-chmod +x /usr/local/bin/valhalla-relay
-log "Binary built: /usr/local/bin/valhalla-relay"
+log "Building relay node from ${SRC_DIR}..."
+cd "${SRC_DIR}"
+/usr/local/go/bin/go build -buildvcs=false -o "${RELAY_BIN}/valhalla-relay" .
+chmod 755 "${RELAY_BIN}/valhalla-relay"
+chown relay:relay "${RELAY_BIN}/valhalla-relay"
+log "Binary: ${RELAY_BIN}/valhalla-relay"
 
-# Prompt for control plane URL
-read -p "Control Plane URL [http://localhost:8443]: " CONTROL_PLANE_URL
-CONTROL_PLANE_URL=${CONTROL_PLANE_URL:-http://localhost:8443}
+# Allow binding privileged ports (e.g. :443) without running as root.
+setcap 'cap_net_bind_service=+ep' "${RELAY_BIN}/valhalla-relay" || true
+setcap 'cap_net_bind_service=+ep' /usr/local/bin/xray             || true
 
-read -p "Max relay sessions [1000]: " CAPACITY
-CAPACITY=${CAPACITY:-1000}
-
-# Create systemd unit
+# systemd unit
 cat > /etc/systemd/system/valhalla-relay.service << EOF
 [Unit]
 Description=Valhalla Relay Node
@@ -70,21 +136,16 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/valhalla-relay
+User=relay
+Group=relay
+EnvironmentFile=${ENV_FILE}
+ExecStart=${RELAY_BIN}/valhalla-relay
 Restart=always
 RestartSec=5
 
-Environment=LISTEN_ADDR=:51821
-Environment=TCP_LISTEN_ADDR=:51822
-Environment=VLESS_LISTEN_ADDR=:443
-Environment=XRAY_BINARY=/usr/local/bin/xray
-Environment=CONTROL_PLANE_URL=${CONTROL_PLANE_URL}
-Environment=PUBLIC_ADDRESS=${PUBLIC_IP}
-Environment=CAPACITY=${CAPACITY}
-
-# Let the relay bind to privileged port 443 without running the whole
-# process as root. Requires CAP_NET_BIND_SERVICE on the binary; we give
-# it below via setcap.
+# Allow the non-root user to bind privileged ports.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 StandardOutput=journal
 StandardError=journal
@@ -94,26 +155,31 @@ SyslogIdentifier=valhalla-relay
 WantedBy=multi-user.target
 EOF
 
-# Give the binaries privilege to bind 443 without full root.
-setcap 'cap_net_bind_service=+ep' /usr/local/bin/valhalla-relay || true
-setcap 'cap_net_bind_service=+ep' /usr/local/bin/xray             || true
-
 systemctl daemon-reload
 systemctl enable valhalla-relay
 systemctl restart valhalla-relay
 
 # Firewall
 if command -v ufw &>/dev/null; then
-    ufw allow 51821/udp
-    ufw allow 51822/tcp
-    ufw allow 443/tcp
-    log "Firewall: ports 51821/udp, 51822/tcp, 443/tcp allowed"
+    ufw allow 51821/udp >/dev/null
+    ufw allow 51822/tcp >/dev/null
+    ufw allow "${VLESS_PORT}/tcp" >/dev/null
+    log "Firewall: 51821/udp, 51822/tcp, ${VLESS_PORT}/tcp allowed"
+fi
+
+# Clean up source tree (the user clones into /opt/relay/res)
+if [[ -d /opt/relay/res && "${SRC_DIR}" == /opt/relay/res/* ]]; then
+    log "Removing source tree /opt/relay/res"
+    cd /
+    rm -rf /opt/relay/res
 fi
 
 log "=================================="
 log "Valhalla Relay Node installed!"
-log "Service: systemctl status valhalla-relay"
-log "Logs:    journalctl -u valhalla-relay -f"
-log "UDP:     ${PUBLIC_IP}:51821"
-log "TCP:     ${PUBLIC_IP}:51822"
+log "Service:  systemctl status valhalla-relay"
+log "Logs:     journalctl -u valhalla-relay -f"
+log "Env:      ${ENV_FILE}"
+log "UDP:      ${PUBLIC_IP}:51821"
+log "TCP:      ${PUBLIC_IP}:51822"
+log "VLESS:    ${PUBLIC_IP}:${VLESS_PORT}"
 log "=================================="
