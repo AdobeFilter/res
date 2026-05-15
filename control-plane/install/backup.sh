@@ -26,6 +26,15 @@ sudo -u postgres pg_dump -Fc valhalla > "${WORK}/valhalla.dump"
 cp "${VALHALLA_ETC}/control-plane.env" "${WORK}/control-plane.env"
 cp "${VALHALLA_ETC}/jwt-secret"        "${WORK}/jwt-secret"
 
+# 2a. relay allowlist — operator-managed source of truth for who may
+#     self-register a relay. Missing file is OK (open dogfood mode);
+#     omitted from the archive in that case so restore mirrors install state.
+ALLOWLIST_PRESENT=0
+if [[ -f "${VALHALLA_ETC}/allowed-relays.txt" ]]; then
+    cp "${VALHALLA_ETC}/allowed-relays.txt" "${WORK}/allowed-relays.txt"
+    ALLOWLIST_PRESENT=1
+fi
+
 # 3. relay roster snapshot — human-readable CSV alongside the binary
 #    pg_dump. Lets an operator inspect "who was registered on what date"
 #    by extracting one file instead of running pg_restore.
@@ -39,11 +48,17 @@ sudo -u postgres psql valhalla -c \
     echo "hostname=$(hostname)"
     echo "pg_version=$(sudo -u postgres psql -tAc 'SHOW server_version;')"
     echo "relay_count=$(($(wc -l < "${WORK}/relays.csv") - 1))"
+    echo "allowlist_present=${ALLOWLIST_PRESENT}"
+    if [[ ${ALLOWLIST_PRESENT} -eq 1 ]]; then
+        echo "allowlist_entries=$(grep -cvE '^\s*(#|$)' "${WORK}/allowed-relays.txt" || true)"
+    fi
 } > "${WORK}/meta"
 
 # 5. tar + gpg symmetric encrypt
 TAR="${WORK}/cp-${TS}.tar.gz"
-tar czf "${TAR}" -C "${WORK}" valhalla.dump control-plane.env jwt-secret relays.csv meta
+TAR_FILES=(valhalla.dump control-plane.env jwt-secret relays.csv meta)
+[[ ${ALLOWLIST_PRESENT} -eq 1 ]] && TAR_FILES+=(allowed-relays.txt)
+tar czf "${TAR}" -C "${WORK}" "${TAR_FILES[@]}"
 
 OUT="${VALHALLA_BACKUPS}/cp-${TS}.tar.gz.gpg"
 gpg --batch --yes --quiet \

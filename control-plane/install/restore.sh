@@ -65,6 +65,13 @@ sudo -u postgres pg_restore -d valhalla --no-owner --role=valhalla "${WORK}/valh
 install -m 600 -o valhalla -g valhalla "${WORK}/control-plane.env" "${VALHALLA_ETC}/control-plane.env"
 install -m 600 -o valhalla -g valhalla "${WORK}/jwt-secret"        "${VALHALLA_ETC}/jwt-secret"
 
+# 5a. relay allowlist — only present in backups taken after the feature
+#     landed. Older archives leave the existing file (or absence) untouched.
+if [[ -f "${WORK}/allowed-relays.txt" ]]; then
+    install -m 600 -o valhalla -g valhalla "${WORK}/allowed-relays.txt" "${VALHALLA_ETC}/allowed-relays.txt"
+    echo "relay allowlist restored ($(grep -cvE '^\s*(#|$)' "${VALHALLA_ETC}/allowed-relays.txt" || true) entries)"
+fi
+
 # 6. start service
 systemctl start valhalla-control
 

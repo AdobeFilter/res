@@ -42,6 +42,11 @@ type Config struct {
 	// lock them out when switching test accounts. Flipping to true also
 	// requires running migration 010 to restore the global unique index.
 	AntifraudEnabled bool
+
+	// AllowedRelaysFile points at an operator-managed text file listing the
+	// IPs that may self-register a relay. Empty disables the check (open
+	// dogfood mode); set in production via the install script.
+	AllowedRelaysFile string
 }
 
 func Load() *Config {
@@ -61,6 +66,7 @@ func Load() *Config {
 		OfflineNodeRetention:      getDurationEnv("OFFLINE_NODE_RETENTION", 30*24*time.Hour),
 		OfflineNodeSweepInterval:  getDurationEnv("OFFLINE_NODE_SWEEP_INTERVAL", 24*time.Hour),
 		AntifraudEnabled:          getBoolEnv("ANTIFRAUD_ENABLED", false),
+		AllowedRelaysFile:         getEnv("ALLOWED_RELAYS_FILE", ""),
 	}
 }
 

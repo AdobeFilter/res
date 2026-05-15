@@ -133,12 +133,38 @@ MESH_CIDR=10.100.0.0/16
 # while switching test accounts. Flip to true (and apply migration 010)
 # before public launch.
 ANTIFRAUD_ENABLED=false
+# Relay allowlist: path to a newline-separated list of IPs allowed to
+# self-register via POST /api/v1/internal/relay/register. Empty disables
+# the check. Empty file = no relay may register (safe default).
+ALLOWED_RELAYS_FILE=${VALHALLA_ETC}/allowed-relays.txt
 ENV
     chown valhalla:valhalla "${ENV_FILE}"
     chmod 600 "${ENV_FILE}"
     log "Env file written"
 else
     log "Existing ${ENV_FILE} kept — DB password and backup passphrase preserved"
+fi
+
+# Relay allowlist file — operator-managed. Preserved across re-installs so
+# manual additions are not wiped. The control-plane treats a missing file as
+# empty (no relay may register), so the placeholder we drop here is safe.
+ALLOWLIST_FILE="${VALHALLA_ETC}/allowed-relays.txt"
+if [[ ! -f "${ALLOWLIST_FILE}" ]]; then
+    cat > "${ALLOWLIST_FILE}" <<'ALLOW'
+# Valhalla relay allowlist
+# One IPv4 per line. Lines starting with # and blank lines are ignored.
+# Must match BOTH the address declared by the relay AND its TCP source IP.
+# Empty file = no relay may register.
+#
+# Example:
+# 203.0.113.42
+# 198.51.100.7
+ALLOW
+    chown valhalla:valhalla "${ALLOWLIST_FILE}"
+    chmod 600 "${ALLOWLIST_FILE}"
+    log "Relay allowlist created at ${ALLOWLIST_FILE} (empty — add IPs before relays come online)"
+else
+    log "Existing relay allowlist kept at ${ALLOWLIST_FILE}"
 fi
 
 # Build binary

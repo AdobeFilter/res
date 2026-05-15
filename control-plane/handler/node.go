@@ -235,13 +235,19 @@ func extractPathParam(path, prefix string) string {
 // --- Internal Handlers (STUN/Relay registration) ---
 
 type InternalHandler struct {
-	stunRepo  db.STUNServerRepository
-	relayRepo db.RelayServerRepository
-	logger    *zap.Logger
+	stunRepo          db.STUNServerRepository
+	relayRepo         db.RelayServerRepository
+	relayAllowlistPath string
+	logger            *zap.Logger
 }
 
-func NewInternalHandler(stunRepo db.STUNServerRepository, relayRepo db.RelayServerRepository, logger *zap.Logger) *InternalHandler {
-	return &InternalHandler{stunRepo: stunRepo, relayRepo: relayRepo, logger: logger}
+func NewInternalHandler(stunRepo db.STUNServerRepository, relayRepo db.RelayServerRepository, relayAllowlistPath string, logger *zap.Logger) *InternalHandler {
+	return &InternalHandler{
+		stunRepo:          stunRepo,
+		relayRepo:         relayRepo,
+		relayAllowlistPath: relayAllowlistPath,
+		logger:            logger,
+	}
 }
 
 // RegisterSTUN handles POST /api/v1/internal/stun/register
@@ -274,6 +280,15 @@ func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if err := checkRelayAllowed(r, req.Address, h.relayAllowlistPath); err != nil {
+		h.logger.Warn("relay registration rejected",
+			zap.String("declared", req.Address),
+			zap.String("remote", r.RemoteAddr),
+			zap.Error(err))
+		writeError(w, http.StatusForbidden, "relay not allowed")
+		return
+	}
+
 	// Default vless_port if not provided (old relay binaries that don't know
 	// about it yet still register a UDP-only relay; xray-subprocess is
 	// optional from the control-plane's perspective).
@@ -282,8 +297,17 @@ func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) 
 		vlessPort = 443
 	}
 
+	// Cap self-declared capacity so a misconfigured or hostile relay can't
+	// monopolise GetBestAvailable by claiming a huge slot count. Real ranking
+	// by measured throughput/RTT belongs in heartbeat metrics; until then,
+	// this is the simplest mitigation.
+	capacity := req.Capacity
+	if capacity > maxRelayCapacity {
+		capacity = maxRelayCapacity
+	}
+
 	creds, err := h.relayRepo.UpsertWithCredentials(
-		r.Context(), req.Address, req.Port, vlessPort, req.Capacity,
+		r.Context(), req.Address, req.Port, vlessPort, capacity,
 	)
 	if err != nil {
 		h.logger.Error("register relay failed", zap.Error(err))
