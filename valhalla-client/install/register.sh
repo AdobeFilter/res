@@ -16,7 +16,7 @@ set -euo pipefail
 #   VALHALLA_PASS=<password>
 #
 # Optional env:
-#   VALHALLA_CONTROL=http://144.48.10.51:8443   # default
+#   VALHALLA_CONTROL=http://144.31.236.184:8443   # default
 #   VALHALLA_NODE_NAME=<hostname>               # default = `hostname`
 #   VALHALLA_EXIT_LINK=vless://...              # user's exit-node, persisted
 #                                               # to client.env so valhalla-client
@@ -39,7 +39,11 @@ error() { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
 [[ $EUID -ne 0 ]] && error "must run as root"
 
-CONTROL="${VALHALLA_CONTROL:-http://144.48.10.51:8443}"
+# Default control-plane address. Change CONTROL_IP here to point all clients
+# at a different server; per-run overrides still work via VALHALLA_CONTROL.
+CONTROL_IP="144.31.236.184"
+CONTROL_PORT="8443"
+CONTROL="${VALHALLA_CONTROL:-http://${CONTROL_IP}:${CONTROL_PORT}}"
 EMAIL="${VALHALLA_EMAIL:-}"
 PASSWORD="${VALHALLA_PASS:-}"
 NODE_NAME="${VALHALLA_NODE_NAME:-$(hostname)}"
