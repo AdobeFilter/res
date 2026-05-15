@@ -64,6 +64,7 @@ func main() {
 	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, logger)
 	sshProxyHandler := handler.NewSSHProxyHandler(logger)
 	connLogHandler := handler.NewConnectionLogHandler("/var/log/valhalla", logger)
+	deviceHandler := handler.NewDeviceHandler(nodeRepo, accountRepo, logger)
 
 	// Router
 	mux := http.NewServeMux()
@@ -72,6 +73,9 @@ func main() {
 	mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", authHandler.Refresh)
+
+	// Device hint (public, pre-login) — returns the email linked to a device_id
+	mux.HandleFunc("GET /api/v1/devices/account-hint", deviceHandler.AccountHint)
 
 	// Internal (STUN/relay self-registration)
 	mux.HandleFunc("POST /api/v1/internal/stun/register", internalHandler.RegisterSTUN)
