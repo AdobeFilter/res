@@ -26,16 +26,24 @@ sudo -u postgres pg_dump -Fc valhalla > "${WORK}/valhalla.dump"
 cp "${VALHALLA_ETC}/control-plane.env" "${WORK}/control-plane.env"
 cp "${VALHALLA_ETC}/jwt-secret"        "${WORK}/jwt-secret"
 
-# 3. metadata for restore sanity-check
+# 3. relay roster snapshot — human-readable CSV alongside the binary
+#    pg_dump. Lets an operator inspect "who was registered on what date"
+#    by extracting one file instead of running pg_restore.
+sudo -u postgres psql valhalla -c \
+    "\copy (SELECT id, address, port, vless_port, capacity, active_sessions, last_seen, reality_sni FROM relay_servers ORDER BY last_seen DESC NULLS LAST) TO STDOUT WITH CSV HEADER" \
+    > "${WORK}/relays.csv"
+
+# 4. metadata for restore sanity-check
 {
     echo "backup_ts=${TS}"
     echo "hostname=$(hostname)"
     echo "pg_version=$(sudo -u postgres psql -tAc 'SHOW server_version;')"
+    echo "relay_count=$(($(wc -l < "${WORK}/relays.csv") - 1))"
 } > "${WORK}/meta"
 
-# 4. tar + gpg symmetric encrypt
+# 5. tar + gpg symmetric encrypt
 TAR="${WORK}/cp-${TS}.tar.gz"
-tar czf "${TAR}" -C "${WORK}" valhalla.dump control-plane.env jwt-secret meta
+tar czf "${TAR}" -C "${WORK}" valhalla.dump control-plane.env jwt-secret relays.csv meta
 
 OUT="${VALHALLA_BACKUPS}/cp-${TS}.tar.gz.gpg"
 gpg --batch --yes --quiet \
@@ -46,7 +54,7 @@ gpg --batch --yes --quiet \
 
 chmod 600 "${OUT}"
 
-# 5. retention
+# 6. retention
 find "${VALHALLA_BACKUPS}" -name 'cp-*.tar.gz.gpg' -mtime "+${RETENTION_DAYS}" -delete
 
 echo "backup ok: ${OUT} ($(du -h "${OUT}" | cut -f1))"
