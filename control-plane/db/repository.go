@@ -12,6 +12,9 @@ type AccountRepository interface {
 	Create(ctx context.Context, email, passwordHash string) (*api.Account, error)
 	GetByEmail(ctx context.Context, email string) (*api.Account, error)
 	GetByID(ctx context.Context, id string) (*api.Account, error)
+	// SetRemnawaveLink stores the Remnawave UUID + subscription URL produced
+	// when the account was provisioned on the panel.
+	SetRemnawaveLink(ctx context.Context, accountID, remnawaveUUID, subscriptionURL string) error
 }
 
 // AccountSettingsRepository handles account settings.

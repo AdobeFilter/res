@@ -107,6 +107,17 @@ if [[ ! -f "${ENV_FILE}" ]]; then
         || sudo -u postgres psql -c "CREATE DATABASE valhalla OWNER valhalla;" >/dev/null
     sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE valhalla TO valhalla;" >/dev/null
 
+    # Remnawave (subscription / quota panel)
+    echo
+    log "Remnawave panel (blank to skip — accounts created without subscriptions)"
+    read -p "Remnawave URL (e.g. https://panel.example.com): " REMNAWAVE_URL
+    REMNAWAVE_TOKEN=""
+    REMNAWAVE_SQUAD_UUID=""
+    if [[ -n "${REMNAWAVE_URL}" ]]; then
+        read -p "Remnawave API token (JWT from Settings → API Tokens): " REMNAWAVE_TOKEN
+        read -p "Default internal-squad UUID (which inbound to attach users to): " REMNAWAVE_SQUAD_UUID
+    fi
+
     # Backup encryption passphrase
     echo
     log "Backups are encrypted with a passphrase you choose."
@@ -137,6 +148,10 @@ ANTIFRAUD_ENABLED=false
 # self-register via POST /api/v1/internal/relay/register. Empty disables
 # the check. Empty file = no relay may register (safe default).
 ALLOWED_RELAYS_FILE=${VALHALLA_ETC}/allowed-relays.txt
+# Remnawave: subscription / quota panel. Empty URL disables provisioning.
+REMNAWAVE_URL=${REMNAWAVE_URL}
+REMNAWAVE_TOKEN=${REMNAWAVE_TOKEN}
+REMNAWAVE_SQUAD_UUID=${REMNAWAVE_SQUAD_UUID}
 ENV
     chown valhalla:valhalla "${ENV_FILE}"
     chmod 600 "${ENV_FILE}"
@@ -237,7 +252,9 @@ systemctl start valhalla-backup.timer
 # Firewall
 if command -v ufw &>/dev/null; then
     ufw allow 8443/tcp >/dev/null
-    log "Firewall: 8443/tcp allowed"
+    ufw allow 3478/udp >/dev/null
+    ufw allow 3479/udp >/dev/null
+    log "Firewall: 8443/tcp, 3478/udp, 3479/udp allowed"
 fi
 
 # Clean up source tree (the user clones into /opt/valhalla/res)

@@ -14,6 +14,7 @@ import (
 	"valhalla/control-plane/db"
 	"valhalla/control-plane/handler"
 	"valhalla/control-plane/middleware"
+	"valhalla/control-plane/remnawave"
 	"valhalla/control-plane/scheduler"
 	"valhalla/control-plane/service"
 	"valhalla/control-plane/stun"
@@ -52,19 +53,28 @@ func main() {
 	// Token manager
 	tokenMgr := crypto.NewTokenManager(cfg.JWTSecret, cfg.TokenExpiry)
 
+	// Remnawave panel client (provisioning + quota lookups). Methods are
+	// no-ops on Enabled() == false, so callers don't need to gate manually.
+	rwClient := remnawave.NewClient(cfg.RemnawaveURL, cfg.RemnawaveToken, cfg.RemnawaveSquadUUID)
+	if rwClient.Enabled() {
+		logger.Info("Remnawave provisioning enabled", zap.String("url", cfg.RemnawaveURL))
+	} else {
+		logger.Warn("Remnawave not configured — accounts will be created without subscriptions")
+	}
+
 	// Services
 	nodeService := service.NewNodeService(nodeRepo, metricsRepo, settingsRepo, stunRepo, ipAlloc, routeRepo, cfg.AntifraudEnabled, logger)
 	routeService := service.NewRouteService(nodeRepo, metricsRepo, routeRepo, relayRepo, logger)
 
 	// Handlers
-	authHandler := handler.NewAuthHandler(accountRepo, tokenMgr, logger)
+	authHandler := handler.NewAuthHandler(accountRepo, tokenMgr, rwClient, logger)
 	nodeHandler := handler.NewNodeHandler(nodeService, nodeRepo, logger)
 	routeHandler := handler.NewRouteHandler(routeService, stunRepo, logger)
 	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, logger)
 	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, cfg.AllowedRelaysFile, logger)
 	sshProxyHandler := handler.NewSSHProxyHandler(logger)
 	connLogHandler := handler.NewConnectionLogHandler("/var/log/valhalla", logger)
-	deviceHandler := handler.NewDeviceHandler(nodeRepo, accountRepo, logger)
+	deviceHandler := handler.NewDeviceHandler(nodeRepo, accountRepo, rwClient, logger)
 
 	// Router
 	mux := http.NewServeMux()
@@ -96,6 +106,7 @@ func main() {
 	mux.Handle("GET /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.GetSettings)))
 	mux.Handle("PUT /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.UpdateSettings)))
 	mux.Handle("GET /api/v1/accounts/{id}/devices", authMw(http.HandlerFunc(settingsHandler.GetDevices)))
+	mux.Handle("GET /api/v1/accounts/me/quota", authMw(http.HandlerFunc(deviceHandler.Quota)))
 	mux.Handle("POST /api/v1/ssh/setup", authMw(http.HandlerFunc(sshProxyHandler.Setup)))
 	mux.Handle("POST /api/v1/logs/connection", authMw(http.HandlerFunc(connLogHandler.Append)))
 

@@ -5,20 +5,23 @@ import (
 
 	"go.uber.org/zap"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/middleware"
+	"valhalla/control-plane/remnawave"
 )
 
 // DeviceHandler exposes device-scoped endpoints that don't require an
 // authenticated session. Used pre-login to streamline onboarding (e.g.
 // auto-fill the email field once we know which account this device is
-// linked to).
+// linked to). Also serves the authenticated quota endpoint.
 type DeviceHandler struct {
-	nodes    db.NodeRepository
-	accounts db.AccountRepository
-	logger   *zap.Logger
+	nodes     db.NodeRepository
+	accounts  db.AccountRepository
+	remnawave *remnawave.Client
+	logger    *zap.Logger
 }
 
-func NewDeviceHandler(nodes db.NodeRepository, accounts db.AccountRepository, logger *zap.Logger) *DeviceHandler {
-	return &DeviceHandler{nodes: nodes, accounts: accounts, logger: logger}
+func NewDeviceHandler(nodes db.NodeRepository, accounts db.AccountRepository, rw *remnawave.Client, logger *zap.Logger) *DeviceHandler {
+	return &DeviceHandler{nodes: nodes, accounts: accounts, remnawave: rw, logger: logger}
 }
 
 // AccountHint handles GET /api/v1/devices/account-hint?device_id=...
@@ -51,4 +54,59 @@ func (h *DeviceHandler) AccountHint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"email": account.Email})
+}
+
+// Quota handles GET /api/v1/accounts/me/quota — authenticated.
+// Returns the current account's monthly subscription state pulled live from
+// Remnawave: bytes used so far + total quota. The Android TrafficBar polls
+// this. When Remnawave isn't configured (dogfood / standalone), returns the
+// free-tier defaults so the bar still renders sensibly.
+func (h *DeviceHandler) Quota(w http.ResponseWriter, r *http.Request) {
+	accountID := middleware.GetAccountID(r.Context())
+	if accountID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	type quotaResponse struct {
+		BytesUsed       int64  `json:"bytes_used"`
+		BytesTotal      int64  `json:"bytes_total"`
+		Tier            string `json:"tier"`
+		SubscriptionURL string `json:"subscription_url,omitempty"`
+	}
+
+	account, err := h.accounts.GetByID(r.Context(), accountID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "account not found")
+		return
+	}
+
+	// Standalone mode or account that wasn't linked: return free-tier zeros.
+	if !h.remnawave.Enabled() || account.RemnawaveUUID == "" {
+		writeJSON(w, http.StatusOK, quotaResponse{
+			BytesUsed: 0, BytesTotal: remnawave.FreeTierBytes,
+			Tier: account.Tier, SubscriptionURL: account.SubscriptionURL,
+		})
+		return
+	}
+
+	user, err := h.remnawave.GetUser(account.RemnawaveUUID)
+	if err != nil {
+		h.logger.Warn("remnawave quota fetch failed",
+			zap.String("account_id", accountID), zap.Error(err))
+		// Fail soft so the UI doesn't pop a scary error — return the limit
+		// without usage and let the next poll retry.
+		writeJSON(w, http.StatusOK, quotaResponse{
+			BytesUsed: 0, BytesTotal: remnawave.FreeTierBytes,
+			Tier: account.Tier, SubscriptionURL: account.SubscriptionURL,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, quotaResponse{
+		BytesUsed:       user.UserTraffic.UsedTrafficBytes,
+		BytesTotal:      user.TrafficLimit,
+		Tier:            account.Tier,
+		SubscriptionURL: user.SubscriptionURL,
+	})
 }

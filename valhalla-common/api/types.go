@@ -44,11 +44,14 @@ const (
 
 // Account represents a user account.
 type Account struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Email           string    `json:"email"`
+	PasswordHash    string    `json:"-"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Tier            string    `json:"tier"`             // free | paid
+	RemnawaveUUID   string    `json:"remnawave_uuid"`   // empty until Remnawave user is provisioned
+	SubscriptionURL string    `json:"subscription_url"` // returned by Remnawave on create
 }
 
 // ExitNodeConfig is a VLESS / VMess / Trojan / Shadowsocks endpoint the user

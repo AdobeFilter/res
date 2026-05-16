@@ -18,13 +18,35 @@ func NewAccountRepository(pool *pgxpool.Pool) AccountRepository {
 	return &pgAccountRepo{pool: pool}
 }
 
+// accountColumns is the SELECT list used by every read path; keeping it in
+// one place means adding a column = touch this const + the Scan() calls.
+const accountColumns = `id, email, password_hash, created_at, updated_at, tier, remnawave_uuid, subscription_url`
+
+func scanAccount(row pgx.Row, acc *api.Account) error {
+	var rwUUID, subURL *string
+	if err := row.Scan(
+		&acc.ID, &acc.Email, &acc.PasswordHash, &acc.CreatedAt, &acc.UpdatedAt,
+		&acc.Tier, &rwUUID, &subURL,
+	); err != nil {
+		return err
+	}
+	if rwUUID != nil {
+		acc.RemnawaveUUID = *rwUUID
+	}
+	if subURL != nil {
+		acc.SubscriptionURL = *subURL
+	}
+	return nil
+}
+
 func (r *pgAccountRepo) Create(ctx context.Context, email, passwordHash string) (*api.Account, error) {
 	var acc api.Account
 	err := r.pool.QueryRow(ctx,
 		`INSERT INTO accounts (email, password_hash) VALUES ($1, $2)
-		 RETURNING id, email, created_at, updated_at`,
+		 RETURNING `+accountColumns,
 		email, passwordHash,
-	).Scan(&acc.ID, &acc.Email, &acc.CreatedAt, &acc.UpdatedAt)
+	).Scan(&acc.ID, &acc.Email, &acc.PasswordHash, &acc.CreatedAt, &acc.UpdatedAt,
+		&acc.Tier, new(*string), new(*string))
 	if err != nil {
 		return nil, fmt.Errorf("create account: %w", err)
 	}
@@ -41,14 +63,14 @@ func (r *pgAccountRepo) Create(ctx context.Context, email, passwordHash string) 
 
 func (r *pgAccountRepo) GetByEmail(ctx context.Context, email string) (*api.Account, error) {
 	var acc api.Account
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, created_at, updated_at FROM accounts WHERE email=$1`,
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+accountColumns+` FROM accounts WHERE email=$1`,
 		email,
-	).Scan(&acc.ID, &acc.Email, &acc.PasswordHash, &acc.CreatedAt, &acc.UpdatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, api.ErrNotFound
-	}
-	if err != nil {
+	)
+	if err := scanAccount(row, &acc); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, api.ErrNotFound
+		}
 		return nil, fmt.Errorf("get account by email: %w", err)
 	}
 	return &acc, nil
@@ -56,17 +78,27 @@ func (r *pgAccountRepo) GetByEmail(ctx context.Context, email string) (*api.Acco
 
 func (r *pgAccountRepo) GetByID(ctx context.Context, id string) (*api.Account, error) {
 	var acc api.Account
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, created_at, updated_at FROM accounts WHERE id=$1`,
-		id,
-	).Scan(&acc.ID, &acc.Email, &acc.PasswordHash, &acc.CreatedAt, &acc.UpdatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, api.ErrNotFound
-	}
-	if err != nil {
+	row := r.pool.QueryRow(ctx,
+		`SELECT `+accountColumns+` FROM accounts WHERE id=$1`, id,
+	)
+	if err := scanAccount(row, &acc); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, api.ErrNotFound
+		}
 		return nil, fmt.Errorf("get account by id: %w", err)
 	}
 	return &acc, nil
+}
+
+func (r *pgAccountRepo) SetRemnawaveLink(ctx context.Context, accountID, remnawaveUUID, subscriptionURL string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE accounts SET remnawave_uuid=$2, subscription_url=$3, updated_at=NOW() WHERE id=$1`,
+		accountID, remnawaveUUID, subscriptionURL,
+	)
+	if err != nil {
+		return fmt.Errorf("set remnawave link: %w", err)
+	}
+	return nil
 }
 
 // --- Account Settings ---

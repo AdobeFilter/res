@@ -3,23 +3,26 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"go.uber.org/zap"
 	"valhalla/common/crypto"
 	"valhalla/common/protocol"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/remnawave"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthHandler struct {
-	accounts db.AccountRepository
-	tokens   *crypto.TokenManager
-	logger   *zap.Logger
+	accounts  db.AccountRepository
+	tokens    *crypto.TokenManager
+	remnawave *remnawave.Client
+	logger    *zap.Logger
 }
 
-func NewAuthHandler(accounts db.AccountRepository, tokens *crypto.TokenManager, logger *zap.Logger) *AuthHandler {
-	return &AuthHandler{accounts: accounts, tokens: tokens, logger: logger}
+func NewAuthHandler(accounts db.AccountRepository, tokens *crypto.TokenManager, rw *remnawave.Client, logger *zap.Logger) *AuthHandler {
+	return &AuthHandler{accounts: accounts, tokens: tokens, remnawave: rw, logger: logger}
 }
 
 // Register handles POST /api/v1/auth/register
@@ -54,6 +57,24 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Provision a Remnawave user with the free-tier monthly quota and
+	// persist the link. We treat panel failure as soft — the account is
+	// still usable for mesh features; quota/subscription URL will be empty
+	// until an operator backfills (or the user re-registers). Logging is
+	// loud so the failure is obvious.
+	if h.remnawave.Enabled() {
+		username := remnawaveUsername(account.ID)
+		user, rwErr := h.remnawave.CreateUser(username, req.Email, remnawave.FreeTierBytes)
+		if rwErr != nil {
+			h.logger.Error("remnawave provisioning failed",
+				zap.String("account_id", account.ID),
+				zap.String("email", req.Email),
+				zap.Error(rwErr))
+		} else if err := h.accounts.SetRemnawaveLink(r.Context(), account.ID, user.UUID, user.SubscriptionURL); err != nil {
+			h.logger.Error("save remnawave link failed", zap.String("account_id", account.ID), zap.Error(err))
+		}
+	}
+
 	token, err := h.tokens.GenerateToken(account.ID, "")
 	if err != nil {
 		h.logger.Error("generate token failed", zap.Error(err))
@@ -65,6 +86,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		Token:     token,
 		AccountID: account.ID,
 	})
+}
+
+// remnawaveUsername builds an alphanumeric+underscore Remnawave username
+// from our account UUID. Remnawave constrains usernames; stripping dashes
+// gives a 32-char hex string that's safe across versions.
+func remnawaveUsername(accountID string) string {
+	return "v_" + strings.ReplaceAll(accountID, "-", "")
 }
 
 // Login handles POST /api/v1/auth/login

@@ -47,6 +47,13 @@ type Config struct {
 	// IPs that may self-register a relay. Empty disables the check (open
 	// dogfood mode); set in production via the install script.
 	AllowedRelaysFile string
+
+	// Remnawave panel that hands out subscriptions and tracks per-user
+	// traffic. Empty RemnawaveURL disables provisioning (e.g. when running
+	// the control-plane standalone for tests).
+	RemnawaveURL       string
+	RemnawaveToken     string
+	RemnawaveSquadUUID string // default internal-squad UUID to attach new users to
 }
 
 func Load() *Config {
@@ -67,6 +74,9 @@ func Load() *Config {
 		OfflineNodeSweepInterval:  getDurationEnv("OFFLINE_NODE_SWEEP_INTERVAL", 24*time.Hour),
 		AntifraudEnabled:          getBoolEnv("ANTIFRAUD_ENABLED", false),
 		AllowedRelaysFile:         getEnv("ALLOWED_RELAYS_FILE", ""),
+		RemnawaveURL:              getEnv("REMNAWAVE_URL", ""),
+		RemnawaveToken:            getEnv("REMNAWAVE_TOKEN", ""),
+		RemnawaveSquadUUID:        getEnv("REMNAWAVE_SQUAD_UUID", ""),
 	}
 }
 
