@@ -14,7 +14,7 @@ import (
 )
 
 // FreeTierBytes is the monthly quota handed to every account on register.
-const FreeTierBytes int64 = 5 * 1024 * 1024 * 1024
+const FreeTierBytes int64 = 1 * 128 * 1024 * 1024
 
 // Client talks to a Remnawave instance over HTTPS with a bearer JWT.
 // Construct via NewClient; methods are safe for concurrent use.
