@@ -107,6 +107,7 @@ func main() {
 	mux.Handle("PUT /api/v1/accounts/{id}/settings", authMw(http.HandlerFunc(settingsHandler.UpdateSettings)))
 	mux.Handle("GET /api/v1/accounts/{id}/devices", authMw(http.HandlerFunc(settingsHandler.GetDevices)))
 	mux.Handle("GET /api/v1/accounts/me/quota", authMw(http.HandlerFunc(deviceHandler.Quota)))
+	mux.Handle("POST /api/v1/accounts/me/reprovision", authMw(http.HandlerFunc(deviceHandler.Reprovision)))
 	mux.Handle("POST /api/v1/ssh/setup", authMw(http.HandlerFunc(sshProxyHandler.Setup)))
 	mux.Handle("POST /api/v1/logs/connection", authMw(http.HandlerFunc(connLogHandler.Append)))
 

@@ -90,6 +90,17 @@ func (r *pgAccountRepo) GetByID(ctx context.Context, id string) (*api.Account, e
 	return &acc, nil
 }
 
+func (r *pgAccountRepo) Delete(ctx context.Context, id string) error {
+	cmd, err := r.pool.Exec(ctx, `DELETE FROM accounts WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("delete account: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return api.ErrNotFound
+	}
+	return nil
+}
+
 func (r *pgAccountRepo) SetRemnawaveLink(ctx context.Context, accountID, remnawaveUUID, subscriptionURL string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE accounts SET remnawave_uuid=$2, subscription_url=$3, updated_at=NOW() WHERE id=$1`,

@@ -12,6 +12,9 @@ type AccountRepository interface {
 	Create(ctx context.Context, email, passwordHash string) (*api.Account, error)
 	GetByEmail(ctx context.Context, email string) (*api.Account, error)
 	GetByID(ctx context.Context, id string) (*api.Account, error)
+	// Delete removes the account. account_settings / nodes / sessions
+	// cascade automatically (FK ON DELETE CASCADE).
+	Delete(ctx context.Context, id string) error
 	// SetRemnawaveLink stores the Remnawave UUID + subscription URL produced
 	// when the account was provisioned on the panel.
 	SetRemnawaveLink(ctx context.Context, accountID, remnawaveUUID, subscriptionURL string) error

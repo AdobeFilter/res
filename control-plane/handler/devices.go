@@ -110,3 +110,61 @@ func (h *DeviceHandler) Quota(w http.ResponseWriter, r *http.Request) {
 		SubscriptionURL: user.SubscriptionURL,
 	})
 }
+
+// Reprovision handles POST /api/v1/accounts/me/reprovision — authenticated.
+// Creates a Remnawave user for the current account if one doesn't already
+// exist. Heals orphans from periods when Remnawave was misconfigured or
+// transiently down at register time (the current happy path rolls back, so
+// new orphans shouldn't accumulate, but existing rows still need a one-time
+// fix-up). Idempotent: returns the existing link if already provisioned.
+func (h *DeviceHandler) Reprovision(w http.ResponseWriter, r *http.Request) {
+	accountID := middleware.GetAccountID(r.Context())
+	if accountID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !h.remnawave.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "remnawave not configured")
+		return
+	}
+	account, err := h.accounts.GetByID(r.Context(), accountID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "account not found")
+		return
+	}
+
+	type resp struct {
+		RemnawaveUUID   string `json:"remnawave_uuid"`
+		SubscriptionURL string `json:"subscription_url"`
+		Status          string `json:"status"`
+	}
+
+	if account.RemnawaveUUID != "" {
+		writeJSON(w, http.StatusOK, resp{
+			RemnawaveUUID:   account.RemnawaveUUID,
+			SubscriptionURL: account.SubscriptionURL,
+			Status:          "already_provisioned",
+		})
+		return
+	}
+
+	username := remnawaveUsername(account.ID)
+	user, err := h.remnawave.CreateUser(username, account.Email, remnawave.FreeTierBytes)
+	if err != nil {
+		h.logger.Error("reprovision: remnawave CreateUser failed",
+			zap.String("account_id", accountID), zap.Error(err))
+		writeError(w, http.StatusBadGateway, "subscription provisioning failed")
+		return
+	}
+	if err := h.accounts.SetRemnawaveLink(r.Context(), accountID, user.UUID, user.SubscriptionURL); err != nil {
+		h.logger.Error("reprovision: save link failed",
+			zap.String("account_id", accountID), zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "save link failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp{
+		RemnawaveUUID:   user.UUID,
+		SubscriptionURL: user.SubscriptionURL,
+		Status:          "provisioned",
+	})
+}

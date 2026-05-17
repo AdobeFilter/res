@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"go.uber.org/zap"
@@ -13,6 +14,13 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// emailRe mirrors Remnawave's email validator (Zod's z.string().email())
+// closely enough that anything we accept will also pass on the panel side —
+// single-letter TLDs in particular ("x@c.l") are rejected up front instead of
+// after we've already inserted the row in our DB. Kept in sync with the
+// Android client's isValidEmail regex in AuthComponents.kt.
+var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$`)
 
 type AuthHandler struct {
 	accounts  db.AccountRepository
@@ -38,6 +46,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !emailRe.MatchString(req.Email) {
+		writeError(w, http.StatusBadRequest, "invalid email format")
+		return
+	}
+
 	if len(req.Password) < 8 {
 		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
@@ -57,20 +70,31 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Provision a Remnawave user with the free-tier monthly quota and
-	// persist the link. We treat panel failure as soft — the account is
-	// still usable for mesh features; quota/subscription URL will be empty
-	// until an operator backfills (or the user re-registers). Logging is
-	// loud so the failure is obvious.
+	// Provision a Remnawave user with the free-tier monthly quota and persist
+	// the link. When Remnawave is configured (i.e. we're in subscription mode,
+	// not standalone mesh), provisioning is treated as PART of registration —
+	// if it fails, we roll back the account so the next register attempt is
+	// clean (no 409 lurking) and the caller knows something is wrong. When
+	// Remnawave isn't configured, we silently skip.
 	if h.remnawave.Enabled() {
 		username := remnawaveUsername(account.ID)
 		user, rwErr := h.remnawave.CreateUser(username, req.Email, remnawave.FreeTierBytes)
 		if rwErr != nil {
-			h.logger.Error("remnawave provisioning failed",
+			h.logger.Error("remnawave provisioning failed — rolling back account",
 				zap.String("account_id", account.ID),
 				zap.String("email", req.Email),
 				zap.Error(rwErr))
-		} else if err := h.accounts.SetRemnawaveLink(r.Context(), account.ID, user.UUID, user.SubscriptionURL); err != nil {
+			if delErr := h.accounts.Delete(r.Context(), account.ID); delErr != nil {
+				h.logger.Error("rollback delete failed — orphan account left",
+					zap.String("account_id", account.ID), zap.Error(delErr))
+			}
+			writeError(w, http.StatusBadGateway, "subscription provisioning failed; try again")
+			return
+		}
+		if err := h.accounts.SetRemnawaveLink(r.Context(), account.ID, user.UUID, user.SubscriptionURL); err != nil {
+			// Soft failure — Remnawave user exists, our DB write missed. The
+			// reprovision endpoint can re-link from the panel side using
+			// username. Don't roll back the account.
 			h.logger.Error("save remnawave link failed", zap.String("account_id", account.ID), zap.Error(err))
 		}
 	}
