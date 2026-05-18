@@ -8,17 +8,19 @@ import (
 	"valhalla/common/api"
 	"valhalla/common/protocol"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/events"
 	"valhalla/control-plane/middleware"
 )
 
 type SettingsHandler struct {
 	settings db.AccountSettingsRepository
 	nodes    db.NodeRepository
+	events   *events.Broker
 	logger   *zap.Logger
 }
 
-func NewSettingsHandler(settings db.AccountSettingsRepository, nodes db.NodeRepository, logger *zap.Logger) *SettingsHandler {
-	return &SettingsHandler{settings: settings, nodes: nodes, logger: logger}
+func NewSettingsHandler(settings db.AccountSettingsRepository, nodes db.NodeRepository, broker *events.Broker, logger *zap.Logger) *SettingsHandler {
+	return &SettingsHandler{settings: settings, nodes: nodes, events: broker, logger: logger}
 }
 
 // GetSettings handles GET /api/v1/accounts/{id}/settings
@@ -128,6 +130,10 @@ func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 	if settings == nil {
 		settings, _ = h.settings.Get(r.Context(), accountID)
 	}
+
+	// Wake long-polling devices on this account so they pick up the new
+	// settings within milliseconds instead of waiting for their next tick.
+	h.events.Publish(accountID)
 
 	writeJSON(w, http.StatusOK, protocol.SettingsResponse{Settings: *settings})
 }

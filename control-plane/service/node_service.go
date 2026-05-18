@@ -201,32 +201,29 @@ func (s *NodeService) ProcessHeartbeat(ctx context.Context, req protocol.Heartbe
 		s.logger.Warn("failed to insert metrics", zap.Error(err))
 	}
 
-	// Get node to find account
-	node, err := s.nodes.GetByID(ctx, req.NodeID)
+	return s.BuildHeartbeatResponse(ctx, req.NodeID)
+}
+
+// BuildHeartbeatResponse reads (no writes) the current settings, peer list,
+// and STUN servers for the given node's account. Used both as the tail of
+// ProcessHeartbeat and as the re-fetch on a long-poll wake-up.
+func (s *NodeService) BuildHeartbeatResponse(ctx context.Context, nodeID string) (*protocol.HeartbeatResponse, error) {
+	node, err := s.nodes.GetByID(ctx, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("get node: %w", err)
 	}
 
 	resp := &protocol.HeartbeatResponse{}
 
-	// Include account settings
-	settings, err := s.settings.Get(ctx, node.AccountID)
-	if err == nil {
+	if settings, err := s.settings.Get(ctx, node.AccountID); err == nil {
 		resp.Settings = settings
 	}
-
-	// Include updated peers
-	peers, err := s.getPeers(ctx, req.NodeID)
-	if err == nil {
+	if peers, err := s.getPeers(ctx, nodeID); err == nil {
 		resp.Peers = peers
 	}
-
-	// Include STUN servers
-	stunServers, err := s.stunServers.GetAll(ctx)
-	if err == nil {
+	if stunServers, err := s.stunServers.GetAll(ctx); err == nil {
 		resp.STUNServers = stunServers
 	}
-
 	return resp, nil
 }
 

@@ -4,24 +4,33 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"valhalla/common/api"
 	"valhalla/common/protocol"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/events"
 	"valhalla/control-plane/middleware"
 	"valhalla/control-plane/service"
 )
 
+// maxHeartbeatWait caps the long-poll hold time. Bounded so a stuck client
+// doesn't tie a goroutine forever; also fits comfortably under the http
+// server's WriteTimeout (180s).
+const maxHeartbeatWait = 30 * time.Second
+
 type NodeHandler struct {
 	nodeService *service.NodeService
 	nodes       db.NodeRepository
+	events      *events.Broker
 	logger      *zap.Logger
 }
 
-func NewNodeHandler(nodeService *service.NodeService, nodes db.NodeRepository, logger *zap.Logger) *NodeHandler {
-	return &NodeHandler{nodeService: nodeService, nodes: nodes, logger: logger}
+func NewNodeHandler(nodeService *service.NodeService, nodes db.NodeRepository, broker *events.Broker, logger *zap.Logger) *NodeHandler {
+	return &NodeHandler{nodeService: nodeService, nodes: nodes, events: broker, logger: logger}
 }
 
 // Register handles POST /api/v1/nodes/register
@@ -221,7 +230,46 @@ func (h *NodeHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Our own write changed last_seen / endpoint / lan_ip — wake other
+	// devices on this account that are sitting on a long-poll heartbeat.
+	h.events.Publish(node.AccountID)
+
+	// Long-poll: if the client asked to wait, hold the response until
+	// something account-scoped changes (settings update, peer added,
+	// peer's heartbeat refreshed) or the wait budget elapses. Without
+	// ?wait= the handler returns immediately — old clients unchanged.
+	if wait := parseHeartbeatWait(r.URL.Query().Get("wait")); wait > 0 {
+		ch, unsub := h.events.Subscribe(node.AccountID)
+		defer unsub()
+		select {
+		case <-ch:
+			if refreshed, rerr := h.nodeService.BuildHeartbeatResponse(r.Context(), nodeID); rerr == nil {
+				resp = refreshed
+			}
+		case <-time.After(wait):
+			// timeout — return what ProcessHeartbeat built initially
+		case <-r.Context().Done():
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseHeartbeatWait clamps the ?wait=<seconds> param to [0, maxHeartbeatWait].
+func parseHeartbeatWait(raw string) time.Duration {
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	d := time.Duration(n) * time.Second
+	if d > maxHeartbeatWait {
+		d = maxHeartbeatWait
+	}
+	return d
 }
 
 func extractPathParam(path, prefix string) string {

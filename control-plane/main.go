@@ -12,6 +12,7 @@ import (
 	"valhalla/common/crypto"
 	"valhalla/control-plane/config"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/events"
 	"valhalla/control-plane/handler"
 	"valhalla/control-plane/middleware"
 	"valhalla/control-plane/remnawave"
@@ -62,15 +63,21 @@ func main() {
 		logger.Warn("Remnawave not configured — accounts will be created without subscriptions")
 	}
 
+	// In-memory pub/sub keyed by account_id — wakes long-poll heartbeats
+	// when settings change, a peer joins/leaves, or another device's
+	// heartbeat refreshes shared state. Process-local: an HA deployment
+	// would need to replace this with Redis pub/sub or similar.
+	broker := events.NewBroker()
+
 	// Services
 	nodeService := service.NewNodeService(nodeRepo, metricsRepo, settingsRepo, stunRepo, ipAlloc, routeRepo, cfg.AntifraudEnabled, logger)
 	routeService := service.NewRouteService(nodeRepo, metricsRepo, routeRepo, relayRepo, logger)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(accountRepo, tokenMgr, rwClient, logger)
-	nodeHandler := handler.NewNodeHandler(nodeService, nodeRepo, logger)
+	nodeHandler := handler.NewNodeHandler(nodeService, nodeRepo, broker, logger)
 	routeHandler := handler.NewRouteHandler(routeService, stunRepo, logger)
-	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, logger)
+	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, broker, logger)
 	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, cfg.AllowedRelaysFile, logger)
 	sshProxyHandler := handler.NewSSHProxyHandler(logger)
 	connLogHandler := handler.NewConnectionLogHandler("/var/log/valhalla", logger)
@@ -138,7 +145,7 @@ func main() {
 	routeRecalc := scheduler.NewRouteRecalculator(routeService, cfg.RouteRecalcInterval, logger)
 	go routeRecalc.Start(ctx)
 
-	staleCleaner := scheduler.NewStaleNodeCleaner(nodeRepo, cfg.StaleNodeTimeout, cfg.HeartbeatExpectedInterval, logger)
+	staleCleaner := scheduler.NewStaleNodeCleaner(nodeRepo, broker, cfg.StaleNodeTimeout, cfg.HeartbeatExpectedInterval, logger)
 	go staleCleaner.Start(ctx)
 
 	offlineDeleter := scheduler.NewOfflineNodeDeleter(
