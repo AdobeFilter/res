@@ -6,12 +6,48 @@ package remnawave
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// APIError carries the HTTP status from a Remnawave call so callers can
+// branch on conflict / not-found without parsing the body text.
+type APIError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("remnawave %s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// IsConflict reports whether err comes from Remnawave rejecting a create
+// because the entity already exists. Panel returns 400 or 409 depending on
+// which constraint trips (email vs username), so we match either.
+func IsConflict(err error) bool {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.StatusCode == http.StatusConflict || ae.StatusCode == http.StatusBadRequest
+	}
+	return false
+}
+
+// IsNotFound reports whether err is a 404 from Remnawave (e.g. lookup by
+// email of a user that doesn't exist).
+func IsNotFound(err error) bool {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.StatusCode == http.StatusNotFound
+	}
+	return false
+}
 
 // FreeTierBytes is the monthly quota handed to every account on register.
 const FreeTierBytes int64 = 1 * 128 * 1024 * 1024
@@ -91,6 +127,22 @@ func (c *Client) GetUser(uuid string) (*User, error) {
 	return &out.Response, nil
 }
 
+// GetUserByEmail looks up a user by email. Used by registration to recover
+// from an orphan: our accounts DB was wiped but the Remnawave-side user
+// survived, so CreateUser returns a conflict. The auth handler calls this
+// to re-link the existing user to the new account instead of 502-ing.
+// Returns an *APIError with StatusCode=404 (test with IsNotFound) when no
+// user with that email exists.
+func (c *Client) GetUserByEmail(email string) (*User, error) {
+	var out struct {
+		Response User `json:"response"`
+	}
+	if err := c.do("GET", "/api/users/by-email/"+url.PathEscape(email), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Response, nil
+}
+
 func (c *Client) do(method, path string, body interface{}, out interface{}) error {
 	var reqBody io.Reader
 	if body != nil {
@@ -115,7 +167,12 @@ func (c *Client) do(method, path string, body interface{}, out interface{}) erro
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("remnawave %s %s: HTTP %d: %s", method, path, resp.StatusCode, string(respBody))
+		return &APIError{
+			Method:     method,
+			Path:       path,
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+		}
 	}
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {

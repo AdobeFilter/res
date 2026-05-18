@@ -79,6 +79,33 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if h.remnawave.Enabled() {
 		username := remnawaveUsername(account.ID)
 		user, rwErr := h.remnawave.CreateUser(username, req.Email, remnawave.FreeTierBytes)
+		if rwErr != nil && remnawave.IsConflict(rwErr) {
+			// Orphan recovery: a Remnawave user with this email already
+			// exists from a previous registration whose CP account got
+			// wiped (TRUNCATE / admin delete). Re-link the existing user
+			// to the new account instead of 502'ing. Subscription state
+			// (used traffic, expiry) carries over from the panel side,
+			// which is what Remnawave is the source of truth for anyway.
+			// The stale username on the panel is cosmetic — left as-is
+			// to avoid a PATCH round-trip and to make the orphan visible
+			// in the panel if anyone audits later.
+			existing, lookupErr := h.remnawave.GetUserByEmail(req.Email)
+			if lookupErr == nil && existing != nil {
+				h.logger.Info("re-linked existing Remnawave user",
+					zap.String("account_id", account.ID),
+					zap.String("email", req.Email),
+					zap.String("remnawave_uuid", existing.UUID))
+				user = existing
+				rwErr = nil
+			} else if lookupErr != nil && !remnawave.IsNotFound(lookupErr) {
+				// Conflict on create + lookup failed for some other reason
+				// (network blip, panel 5xx). Keep the original error so the
+				// log/response reflects what actually broke.
+				h.logger.Warn("remnawave email-lookup failed during conflict recovery",
+					zap.String("email", req.Email),
+					zap.Error(lookupErr))
+			}
+		}
 		if rwErr != nil {
 			h.logger.Error("remnawave provisioning failed — rolling back account",
 				zap.String("account_id", account.ID),
