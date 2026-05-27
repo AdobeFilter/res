@@ -6,56 +6,25 @@ import (
 )
 
 type Config struct {
-	ControlPlaneURL  string
-	ListenAddr       string // UDP relay listen address
-	TCPListenAddr    string // TCP fallback listen address
-	VLESSListenAddr  string // VLESS+Reality listen address
-	VLESSPort        int    // parsed from VLESSListenAddr for registration
-	XrayBinary       string // path to xray binary (default: "xray" in PATH)
-	Capacity         int    // max concurrent relay sessions
-	PublicAddress    string // public IP for registration
-	MeshDispatchAddr string // loopback addr xray's freedom outbound CONNECTs to (the bridged-VLESS path)
-	MeshListenAddr   string // addr the mesh dispatcher binds; ":9999" exposes it publicly so clients reach it directly through their exit-node, skipping the relay-side VLESS hop
-	MeshAuthKey      string // shared HMAC secret for mesh-token auth on direct (non-loopback) sessions; empty disables token enforcement (dogfood)
+	ControlPlaneURL string
+	ListenAddr      string // UDP relay listen address
+	TCPListenAddr   string // TCP fallback listen address
+	Capacity        int    // max concurrent relay sessions
+	PublicAddress   string // public IP for registration
+	MeshListenAddr  string // addr the mesh dispatcher binds; ":9999" exposes it publicly so clients reach it directly through their exit-node
+	MeshAuthKey     string // shared HMAC secret for mesh-token auth; empty disables token enforcement (dogfood)
 }
 
 func Load() *Config {
-	c := &Config{
+	return &Config{
 		ControlPlaneURL: getEnv("CONTROL_PLANE_URL", "http://localhost:8443"),
 		ListenAddr:      getEnv("LISTEN_ADDR", ":51821"),
 		TCPListenAddr:   getEnv("TCP_LISTEN_ADDR", ":51822"),
-		VLESSListenAddr: getEnv("VLESS_LISTEN_ADDR", ":443"),
-		XrayBinary:      getEnv("XRAY_BINARY", "xray"),
 		Capacity:        getIntEnv("CAPACITY", 1000),
-		PublicAddress:    getEnv("PUBLIC_ADDRESS", ""),
-		MeshDispatchAddr: getEnv("MESH_DISPATCH_ADDR", "127.0.0.1:9999"),
-		MeshListenAddr:   getEnv("MESH_LISTEN_ADDR", ":9999"),
-		MeshAuthKey:      getEnv("MESH_AUTH_KEY", ""),
+		PublicAddress:   getEnv("PUBLIC_ADDRESS", ""),
+		MeshListenAddr:  getEnv("MESH_LISTEN_ADDR", ":9999"),
+		MeshAuthKey:     getEnv("MESH_AUTH_KEY", ""),
 	}
-	// Extract numeric port from VLESSListenAddr (":443" -> 443).
-	if parts := splitHostPort(c.VLESSListenAddr); parts != "" {
-		if p, err := strconv.Atoi(parts); err == nil {
-			c.VLESSPort = p
-		}
-	}
-	if c.VLESSPort == 0 {
-		c.VLESSPort = 443
-	}
-	return c
-}
-
-func splitHostPort(addr string) string {
-	// Accepts ":443", "0.0.0.0:443", "[::]:443" — return the port part.
-	if addr == "" {
-		return ""
-	}
-	// Last colon separates port (good enough for ":N" and "HOST:N").
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[i+1:]
-		}
-	}
-	return ""
 }
 
 func getEnv(key, fallback string) string {

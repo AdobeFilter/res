@@ -26,14 +26,10 @@ const maxSessionsPerPubkey = 16
 // forwards WG datagrams between peers keyed by destination pubkey. It never
 // decrypts WG payloads.
 //
-// Two ingress paths land here on the same listener:
-//   - loopback: xray's freedom outbound bridges a (Reality-fronted) VLESS
-//     stream to 127.0.0.1 — already authenticated by xray's VLESS UUID, so
-//     these skip the mesh-token check.
-//   - direct public: a client reaches the listener straight through its
-//     exit-node's freedom outbound, with no relay-side VLESS. These must
-//     present a valid mesh-token in HELLO (when authKey is configured),
-//     because the port is open to the internet.
+// Clients reach the listener directly through their exit-node's freedom
+// outbound — there is no relay-side VLESS. Because the port is open to the
+// internet, every HELLO must present a valid mesh-token (when authKey is
+// configured); the token is bound to the connecting pubkey.
 type Dispatcher struct {
 	listenAddr string
 	authKey    []byte
@@ -103,8 +99,8 @@ func (d *Dispatcher) ListenAndServe(ctx context.Context) error {
 func (d *Dispatcher) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	// HELLO must arrive within a short window — the xray + reality handshake
-	// (or the direct dial) already happened upstream.
+	// HELLO must arrive within a short window — the exit-node hop and dial
+	// already happened upstream.
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	frameType, payload, err := readFrame(conn)
@@ -117,7 +113,7 @@ func (d *Dispatcher) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	pk, err := d.authenticate(conn, payload)
+	pk, err := d.authenticate(payload)
 	if err != nil {
 		d.logger.Debug("hello rejected",
 			zap.String("remote", conn.RemoteAddr().String()), zap.Error(err))
@@ -166,23 +162,20 @@ func (d *Dispatcher) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// authenticate validates a HELLO payload and returns the client pubkey.
-//
-// Loopback connections are trusted (xray already enforced its VLESS UUID) and
-// only need the bare 32-byte pubkey. Direct connections must additionally
-// carry a mesh-token — [pubkey(32) || expiry(8, big-endian unix) || hmac(32)]
-// — verified against authKey, unless authKey is empty (token enforcement off).
-func (d *Dispatcher) authenticate(conn net.Conn, payload []byte) ([PubkeyLen]byte, error) {
+// authenticate validates a HELLO payload and returns the client pubkey. When
+// authKey is empty (dogfood) the bare 32-byte pubkey is accepted; otherwise the
+// payload must carry a mesh-token — [pubkey(32) || expiry(8, big-endian unix)
+// || hmac(32)] — verified against authKey.
+func (d *Dispatcher) authenticate(payload []byte) ([PubkeyLen]byte, error) {
 	var pk [PubkeyLen]byte
 	if len(payload) < PubkeyLen {
 		return pk, fmt.Errorf("hello too short: %d", len(payload))
 	}
 	copy(pk[:], payload[:PubkeyLen])
 
-	if isLoopback(conn.RemoteAddr()) || len(d.authKey) == 0 {
+	if len(d.authKey) == 0 {
 		return pk, nil
 	}
-	// Direct connection with enforcement on: require and verify the token.
 	return verifyMeshToken(d.authKey, payload, time.Now())
 }
 
@@ -211,15 +204,6 @@ func verifyMeshToken(authKey, payload []byte, now time.Time) ([PubkeyLen]byte, e
 		return pk, errors.New("mesh-token signature mismatch")
 	}
 	return pk, nil
-}
-
-func isLoopback(addr net.Addr) bool {
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func (d *Dispatcher) register(s *session) {

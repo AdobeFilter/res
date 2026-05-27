@@ -1,7 +1,7 @@
-// Package mesh implements the L3-mesh dispatcher. Clients reach it via the
-// relay's VLESS+Reality inbound: each VLESS-tunneled TCP stream is a single
-// logical session — one client — and carries length-prefixed frames the
-// dispatcher uses to route WG ciphertext between peers.
+// Package mesh implements the L3-mesh dispatcher. Clients connect directly
+// (through their exit-node, no relay-side VLESS), opening one or more TCP
+// streams that each carry length-prefixed frames the dispatcher uses to route
+// WG ciphertext between peers.
 //
 // Wire format (big-endian, per frame):
 //

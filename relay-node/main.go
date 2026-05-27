@@ -43,11 +43,9 @@ func main() {
 	}()
 
 	// Mesh dispatcher: pubkey-keyed forwarding of WG ciphertext between peers
-	// (never decrypts). Binds MeshListenAddr (":9999" = public) so clients can
-	// reach it directly through their exit-node, skipping the relay-side VLESS
-	// hop; the legacy xray-bridged loopback path lands on the same listener.
-	// Direct connections must present a mesh-token (MeshAuthKey); loopback ones
-	// are already UUID-gated by xray and skip it.
+	// (never decrypts). Binds MeshListenAddr (":9999" = public); clients reach
+	// it directly through their exit-node. Connections must present a valid
+	// mesh-token when MeshAuthKey is set.
 	dispatcher := mesh.New(cfg.MeshListenAddr, []byte(cfg.MeshAuthKey), logger)
 	go func() {
 		if err := dispatcher.ListenAndServe(ctx); err != nil {
@@ -63,47 +61,21 @@ func main() {
 		}
 	}
 
-	// Registrar: heartbeats control-plane, publishes Reality credentials
-	// once on first successful registration.
+	// Registrar: heartbeats the relay to the control-plane so it stays in the
+	// pool. No credentials round-trip — the relay carries WG ciphertext only.
 	registrar := registration.New(
 		cfg.ControlPlaneURL,
 		cfg.PublicAddress,
 		udpPort,
-		cfg.VLESSPort,
 		cfg.Capacity,
 		logger,
 	)
 	go registrar.Run(ctx)
 
-	// VLESS+Reality — xray subprocess, started once credentials arrive.
-	vlessRelay := transport.NewVLESSRelay(cfg.VLESSPort, cfg.XrayBinary, logger)
-	defer vlessRelay.Stop()
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case creds, ok := <-registrar.Credentials():
-			if !ok {
-				return
-			}
-			if err := vlessRelay.Start(ctx,
-				creds.VLESSUUID,
-				creds.RealityPrivateKey,
-				creds.RealityPublicKey,
-				creds.RealityShortIDs,
-				creds.RealitySNI,
-				cfg.MeshDispatchAddr,
-			); err != nil {
-				logger.Error("failed to start VLESS relay", zap.Error(err))
-			}
-		}
-	}()
-
 	logger.Info("relay node started",
 		zap.String("udp", cfg.ListenAddr),
 		zap.String("tcp", cfg.TCPListenAddr),
-		zap.String("vless", cfg.VLESSListenAddr),
+		zap.String("mesh", cfg.MeshListenAddr),
 		zap.Int("capacity", cfg.Capacity))
 
 	sigCh := make(chan os.Signal, 1)

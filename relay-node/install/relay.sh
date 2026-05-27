@@ -52,16 +52,9 @@ else
     log "Go already installed: $(go version)"
 fi
 
-# Xray — relay-node spawns it as a subprocess for VLESS+Reality.
-if ! command -v xray &>/dev/null; then
-    log "Installing Xray..."
-    apt-get install -y -qq unzip
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    log "Xray installed: $(xray version | head -1)"
-    # The installer creates a systemd unit we don't want — relay-node spawns
-    # xray with its own config, not the system one.
-    systemctl disable --now xray 2>/dev/null || true
-fi
+# No Xray: the relay forwards WG ciphertext only (DERP-style). Clients reach
+# the mesh dispatcher directly through their exit-node, so the relay needs no
+# VLESS/Reality and no xray subprocess.
 
 # System user + directories
 if ! id relay &>/dev/null; then
@@ -93,15 +86,17 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     read -p "Max relay sessions [1000]: " CAPACITY
     CAPACITY=${CAPACITY:-1000}
 
-    read -p "VLESS+Reality listen port [8444]: " VLESS_PORT
-    VLESS_PORT=${VLESS_PORT:-8444}
+    read -p "Mesh dispatcher listen port [9999]: " MESH_PORT
+    MESH_PORT=${MESH_PORT:-9999}
+
+    read -p "Mesh auth key (shared with control-plane; empty = no token enforcement): " MESH_AUTH_KEY
 
     umask 077
     cat > "${ENV_FILE}" <<ENV
 LISTEN_ADDR=:51821
 TCP_LISTEN_ADDR=:51822
-VLESS_LISTEN_ADDR=:${VLESS_PORT}
-XRAY_BINARY=/usr/local/bin/xray
+MESH_LISTEN_ADDR=:${MESH_PORT}
+MESH_AUTH_KEY=${MESH_AUTH_KEY}
 CONTROL_PLANE_URL=${CONTROL_PLANE_URL}
 PUBLIC_ADDRESS=${PUBLIC_IP}
 CAPACITY=${CAPACITY}
@@ -113,8 +108,8 @@ else
     log "Existing ${ENV_FILE} kept"
 fi
 
-# Re-read VLESS port from env so the firewall rule matches whatever is actually in use.
-VLESS_PORT=$(grep -oP 'VLESS_LISTEN_ADDR=:\K[0-9]+' "${ENV_FILE}" || echo "8444")
+# Re-read mesh port from env so the firewall rule matches whatever is in use.
+MESH_PORT=$(grep -oP 'MESH_LISTEN_ADDR=:\K[0-9]+' "${ENV_FILE}" || echo "9999")
 
 # Build binary
 log "Building relay node from ${SRC_DIR}..."
@@ -124,9 +119,8 @@ chmod 755 "${RELAY_BIN}/valhalla-relay"
 chown relay:relay "${RELAY_BIN}/valhalla-relay"
 log "Binary: ${RELAY_BIN}/valhalla-relay"
 
-# Allow binding privileged ports (e.g. :443) without running as root.
+# Allow binding privileged ports without running as root.
 setcap 'cap_net_bind_service=+ep' "${RELAY_BIN}/valhalla-relay" || true
-setcap 'cap_net_bind_service=+ep' /usr/local/bin/xray             || true
 
 # systemd unit
 cat > /etc/systemd/system/valhalla-relay.service << EOF
@@ -163,8 +157,8 @@ systemctl restart valhalla-relay
 if command -v ufw &>/dev/null; then
     ufw allow 51821/udp >/dev/null
     ufw allow 51822/tcp >/dev/null
-    ufw allow "${VLESS_PORT}/tcp" >/dev/null
-    log "Firewall: 51821/udp, 51822/tcp, ${VLESS_PORT}/tcp allowed"
+    ufw allow "${MESH_PORT}/tcp" >/dev/null
+    log "Firewall: 51821/udp, 51822/tcp, ${MESH_PORT}/tcp allowed"
 fi
 
 # Clean up source tree (the user clones into /opt/relay/res)
@@ -181,5 +175,5 @@ log "Logs:     journalctl -u valhalla-relay -f"
 log "Env:      ${ENV_FILE}"
 log "UDP:      ${PUBLIC_IP}:51821"
 log "TCP:      ${PUBLIC_IP}:51822"
-log "VLESS:    ${PUBLIC_IP}:${VLESS_PORT}"
+log "Mesh:     ${PUBLIC_IP}:${MESH_PORT}"
 log "=================================="
