@@ -14,7 +14,9 @@ type Config struct {
 	XrayBinary       string // path to xray binary (default: "xray" in PATH)
 	Capacity         int    // max concurrent relay sessions
 	PublicAddress    string // public IP for registration
-	MeshDispatchAddr string // loopback addr the mesh dispatcher listens on; VLESS clients CONNECT to this as their destination
+	MeshDispatchAddr string // loopback addr xray's freedom outbound CONNECTs to (the bridged-VLESS path)
+	MeshListenAddr   string // addr the mesh dispatcher binds; ":9999" exposes it publicly so clients reach it directly through their exit-node, skipping the relay-side VLESS hop
+	MeshAuthKey      string // shared HMAC secret for mesh-token auth on direct (non-loopback) sessions; empty disables token enforcement (dogfood)
 }
 
 func Load() *Config {
@@ -27,6 +29,8 @@ func Load() *Config {
 		Capacity:        getIntEnv("CAPACITY", 1000),
 		PublicAddress:    getEnv("PUBLIC_ADDRESS", ""),
 		MeshDispatchAddr: getEnv("MESH_DISPATCH_ADDR", "127.0.0.1:9999"),
+		MeshListenAddr:   getEnv("MESH_LISTEN_ADDR", ":9999"),
+		MeshAuthKey:      getEnv("MESH_AUTH_KEY", ""),
 	}
 	// Extract numeric port from VLESSListenAddr (":443" -> 443).
 	if parts := splitHostPort(c.VLESSListenAddr); parts != "" {

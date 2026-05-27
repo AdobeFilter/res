@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 	"valhalla/common/protocol"
 	"valhalla/control-plane/db"
+	"valhalla/control-plane/middleware"
 	"valhalla/control-plane/service"
 )
 
@@ -45,7 +46,10 @@ func (h *RouteHandler) GetOptimal(w http.ResponseWriter, r *http.Request) {
 // startup; per-peer routes (with dst_peer info) are still fetched via
 // /routes/optimal as peers are attached.
 func (h *RouteHandler) GetRelay(w http.ResponseWriter, r *http.Request) {
-	relay, err := h.routeService.GetRelayEndpoint(r.Context())
+	// The JWT carries the calling device's node ID; the service resolves it to
+	// a WG pubkey and binds the minted mesh-token to it. A miss just yields a
+	// tokenless endpoint (works on dogfood relays; rejected by enforcing ones).
+	relay, err := h.routeService.GetRelayEndpoint(r.Context(), middleware.GetNodeID(r.Context()))
 	if err != nil {
 		h.logger.Error("get relay endpoint failed", zap.Error(err))
 		writeError(w, http.StatusNotFound, "no relay available")

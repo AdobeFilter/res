@@ -71,7 +71,7 @@ func main() {
 
 	// Services
 	nodeService := service.NewNodeService(nodeRepo, metricsRepo, settingsRepo, stunRepo, ipAlloc, routeRepo, cfg.AntifraudEnabled, logger)
-	routeService := service.NewRouteService(nodeRepo, metricsRepo, routeRepo, relayRepo, logger)
+	routeService := service.NewRouteService(nodeRepo, metricsRepo, routeRepo, relayRepo, cfg.MeshAuthKey, cfg.MeshDispatchPort, logger)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(accountRepo, tokenMgr, rwClient, logger)

@@ -3,6 +3,8 @@ package mesh
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"io"
 	"net"
@@ -11,6 +13,18 @@ import (
 
 	"go.uber.org/zap/zaptest"
 )
+
+// issueTestHello builds a direct-connection HELLO payload
+// [pubkey || expiry || hmac] the way the control-plane issues mesh-tokens.
+// Mirrors the issuance side so the verifier is exercised end-to-end.
+func issueTestHello(key []byte, pk [PubkeyLen]byte, expiry time.Time) []byte {
+	payload := make([]byte, PubkeyLen+8)
+	copy(payload, pk[:])
+	binary.BigEndian.PutUint64(payload[PubkeyLen:], uint64(expiry.Unix()))
+	h := hmac.New(sha256.New, key)
+	h.Write(payload)
+	return append(payload, h.Sum(nil)...)
+}
 
 // Two mock clients register under distinct pubkeys, one sends a DATAGRAM
 // for the other, and we assert the recipient gets the payload with the
@@ -26,7 +40,7 @@ func TestDispatcherForwardsBetweenPeers(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	d := New(addr, zaptest.NewLogger(t))
+	d := New(addr, nil, zaptest.NewLogger(t))
 	go func() {
 		if err := d.ListenAndServe(ctx); err != nil {
 			t.Log("dispatcher stopped:", err)
@@ -87,9 +101,10 @@ func TestDispatcherForwardsBetweenPeers(t *testing.T) {
 	}
 }
 
-// A reconnects under the same pubkey; the old session must be evicted so
-// there's exactly one entry in the table.
-func TestDispatcherReplacesExistingSession(t *testing.T) {
+// Multi-stream: a client opens several streams under the same pubkey (that's
+// how MeshBind parallelises the relay leg). All must coexist as separate
+// sessions — not evict each other.
+func TestDispatcherAllowsMultipleStreamsPerPubkey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -97,7 +112,7 @@ func TestDispatcherReplacesExistingSession(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	d := New(addr, zaptest.NewLogger(t))
+	d := New(addr, nil, zaptest.NewLogger(t))
 	go d.ListenAndServe(ctx)
 	waitForListener(t, addr)
 
@@ -106,19 +121,83 @@ func TestDispatcherReplacesExistingSession(t *testing.T) {
 	first := dial(t, addr)
 	_ = writeFrame(first, FrameHello, pk[:])
 	defer first.Close()
-
 	waitFor(t, func() bool { return d.ActiveSessions() == 1 })
 
 	second := dial(t, addr)
 	_ = writeFrame(second, FrameHello, pk[:])
 	defer second.Close()
 
-	// Old conn must be force-closed; the count stays at 1.
-	waitFor(t, func() bool {
-		_ = first.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		_, err := first.Read(make([]byte, 1))
-		return err != nil && d.ActiveSessions() == 1
-	})
+	// Both streams stay registered, and the first is NOT force-closed.
+	waitFor(t, func() bool { return d.ActiveSessions() == 2 })
+	_ = first.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	_, err := first.Read(make([]byte, 1))
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("first stream should stay open (timeout on read), got err=%v", err)
+	}
+}
+
+// A flood of streams under one pubkey is capped; excess evicts the oldest.
+func TestDispatcherCapsSessionsPerPubkey(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	ln.Close()
+
+	d := New(addr, nil, zaptest.NewLogger(t))
+	go d.ListenAndServe(ctx)
+	waitForListener(t, addr)
+
+	pk := fillPK(0x42)
+	for i := 0; i < maxSessionsPerPubkey+5; i++ {
+		c := dial(t, addr)
+		_ = writeFrame(c, FrameHello, pk[:])
+		defer c.Close()
+	}
+
+	// Never exceeds the cap.
+	waitFor(t, func() bool { return d.ActiveSessions() == maxSessionsPerPubkey })
+	time.Sleep(100 * time.Millisecond)
+	if got := d.ActiveSessions(); got != maxSessionsPerPubkey {
+		t.Fatalf("expected cap %d, got %d", maxSessionsPerPubkey, got)
+	}
+}
+
+// Token verification: a well-formed token for a pubkey passes; tampering with
+// the pubkey, the key, or the expiry fails.
+func TestVerifyMeshToken(t *testing.T) {
+	key := []byte("shared-mesh-secret")
+	pk := fillPK(0x42)
+	now := time.Unix(1_700_000_000, 0)
+
+	good := issueTestHello(key, pk, now.Add(time.Hour))
+	if _, err := verifyMeshToken(key, good, now); err != nil {
+		t.Fatalf("valid token rejected: %v", err)
+	}
+
+	// Expired.
+	expired := issueTestHello(key, pk, now.Add(-time.Hour))
+	if _, err := verifyMeshToken(key, expired, now); err == nil {
+		t.Fatal("expired token accepted")
+	}
+
+	// Wrong key.
+	if _, err := verifyMeshToken([]byte("other-secret"), good, now); err == nil {
+		t.Fatal("token verified under wrong key")
+	}
+
+	// Tampered pubkey (attacker swaps in a victim's pubkey but keeps the mac).
+	tampered := append([]byte(nil), good...)
+	tampered[0] ^= 0xFF
+	if _, err := verifyMeshToken(key, tampered, now); err == nil {
+		t.Fatal("token accepted after pubkey tamper")
+	}
+
+	// Missing token bytes.
+	if _, err := verifyMeshToken(key, pk[:], now); err == nil {
+		t.Fatal("bare pubkey accepted as a token")
+	}
 }
 
 // DATAGRAMs destined for a peer with no active session are silently dropped.
@@ -130,7 +209,7 @@ func TestDispatcherDropsUnroutableDatagram(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	d := New(addr, zaptest.NewLogger(t))
+	d := New(addr, nil, zaptest.NewLogger(t))
 	go d.ListenAndServe(ctx)
 	waitForListener(t, addr)
 

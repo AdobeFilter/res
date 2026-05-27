@@ -20,6 +20,15 @@ type RelayEndpoint struct {
 	RealityPublicKey string `json:"reality_public_key"`
 	RealitySNI       string `json:"reality_sni"`
 	RealityShortID   string `json:"reality_short_id"`
+	// DispatchPort is the relay's public mesh-dispatcher port. The client
+	// dials Address:DispatchPort directly (through its exit-node) and speaks
+	// WG-ciphertext frames — no relay-side VLESS. The VLESS/Reality fields
+	// above remain for the legacy bridged path during rollout.
+	DispatchPort int `json:"dispatch_port,omitempty"`
+	// MeshToken authenticates the client's pubkey to the dispatcher:
+	// base64(expiry(8B BE unix) || HMAC-SHA256(meshAuthKey, pubkey||expiry)).
+	// Empty when the control-plane has no MeshAuthKey configured (dogfood).
+	MeshToken string `json:"mesh_token,omitempty"`
 }
 
 // RouteResponse is returned by GET /api/v1/routes/optimal. It carries the

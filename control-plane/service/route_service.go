@@ -2,9 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"valhalla/common/api"
@@ -13,6 +18,11 @@ import (
 	"valhalla/control-plane/routing"
 )
 
+// meshTokenTTL is how long a minted mesh-token stays valid. Clients re-fetch
+// the relay endpoint frequently (every VpnService boot / route refresh), so a
+// short-ish window keeps revocation responsive without churn.
+const meshTokenTTL = 7 * 24 * time.Hour
+
 type RouteService struct {
 	nodes    db.NodeRepository
 	metrics  db.MetricsRepository
@@ -20,6 +30,9 @@ type RouteService struct {
 	relays   db.RelayServerRepository
 	optimizer *routing.Optimizer
 	logger   *zap.Logger
+
+	meshAuthKey      []byte
+	meshDispatchPort int
 }
 
 func NewRouteService(
@@ -27,16 +40,78 @@ func NewRouteService(
 	metrics db.MetricsRepository,
 	routes db.RouteRepository,
 	relays db.RelayServerRepository,
+	meshAuthKey string,
+	meshDispatchPort int,
 	logger *zap.Logger,
 ) *RouteService {
 	return &RouteService{
-		nodes:     nodes,
-		metrics:   metrics,
-		routes:    routes,
-		relays:    relays,
-		optimizer: routing.NewOptimizer(routing.DefaultWeights()),
-		logger:    logger,
+		nodes:            nodes,
+		metrics:          metrics,
+		routes:           routes,
+		relays:           relays,
+		optimizer:        routing.NewOptimizer(routing.DefaultWeights()),
+		logger:           logger,
+		meshAuthKey:      []byte(meshAuthKey),
+		meshDispatchPort: meshDispatchPort,
 	}
+}
+
+// issueMeshToken mints the token a client presents to a relay's public mesh
+// dispatcher. It binds the client's WG pubkey so a holder of one token can't
+// register a different pubkey. pubkeyB64 is the node's WG public key (base64
+// of 32 raw bytes); the HMAC and the relay-side verifier both run over the
+// raw pubkey||expiry. Returns "" when no MeshAuthKey is configured.
+func (s *RouteService) issueMeshToken(pubkeyB64 string) string {
+	if len(s.meshAuthKey) == 0 {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(pubkeyB64)
+	if err != nil || len(raw) != 32 {
+		s.logger.Warn("mesh-token: bad node pubkey, issuing none", zap.Int("len", len(raw)))
+		return ""
+	}
+	signed := make([]byte, 32+8) // pubkey || expiry — the HMAC input
+	copy(signed, raw)
+	binary.BigEndian.PutUint64(signed[32:], uint64(time.Now().Add(meshTokenTTL).Unix()))
+
+	h := hmac.New(sha256.New, s.meshAuthKey)
+	h.Write(signed)
+
+	out := make([]byte, 0, 8+sha256.Size)
+	out = append(out, signed[32:]...) // expiry(8)
+	out = append(out, h.Sum(nil)...)  // hmac(32)
+	return base64.StdEncoding.EncodeToString(out)
+}
+
+// buildRelayEndpoint assembles the wire struct for a relay, including the
+// dispatch port and a mesh-token bound to callerPubkeyB64 (the client's WG
+// pubkey). An empty callerPubkeyB64 yields no token.
+func (s *RouteService) buildRelayEndpoint(relay *api.RelayServer, callerPubkeyB64 string) *protocol.RelayEndpoint {
+	return &protocol.RelayEndpoint{
+		Address:          relay.Address,
+		VLESSPort:        relay.VLESSPort,
+		VLESSUUID:        relay.VLESSUUID,
+		RealityPublicKey: relay.RealityPublicKey,
+		RealitySNI:       relay.RealitySNI,
+		RealityShortID:   firstShortID(relay.RealityShortIDs),
+		DispatchPort:     s.meshDispatchPort,
+		MeshToken:        s.issueMeshToken(callerPubkeyB64),
+	}
+}
+
+// pubkeyOfNode looks up a node's WG public key by ID, returning "" (and
+// logging) on miss so callers can degrade to a tokenless endpoint rather than
+// failing the whole route request.
+func (s *RouteService) pubkeyOfNode(ctx context.Context, nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	n, err := s.nodes.GetByID(ctx, nodeID)
+	if err != nil || n == nil {
+		s.logger.Debug("mesh-token: caller node lookup failed", zap.String("node", nodeID), zap.Error(err))
+		return ""
+	}
+	return n.PublicKey
 }
 
 // GetOptimalRoute calculates the best route between two nodes.
@@ -155,14 +230,9 @@ func (s *RouteService) GetOptimalRouteResponse(ctx context.Context, srcNodeID, d
 		if err != nil {
 			return nil, fmt.Errorf("no relay available: %w", err)
 		}
-		resp.Relay = &protocol.RelayEndpoint{
-			Address:          relay.Address,
-			VLESSPort:        relay.VLESSPort,
-			VLESSUUID:        relay.VLESSUUID,
-			RealityPublicKey: relay.RealityPublicKey,
-			RealitySNI:       relay.RealitySNI,
-			RealityShortID:   firstShortID(relay.RealityShortIDs),
-		}
+		// Bind the mesh-token to the source node (the caller) — it's the side
+		// that registers its pubkey on the dispatcher.
+		resp.Relay = s.buildRelayEndpoint(relay, s.pubkeyOfNode(ctx, srcNodeID))
 		resp.Route.RelayNodeID = relay.ID
 	}
 
@@ -170,22 +240,16 @@ func (s *RouteService) GetOptimalRouteResponse(ctx context.Context, srcNodeID, d
 }
 
 // GetRelayEndpoint returns the best relay's credentials so a client can
-// configure its xray mesh-chain at VpnService start without needing to
-// pretend a target peer first. Same data the GetOptimalRouteResponse
+// configure its mesh transport at VpnService start without needing to pretend
+// a target peer first. callerPubkeyB64 is the requesting node's WG pubkey; the
+// minted mesh-token is bound to it. Same data the GetOptimalRouteResponse
 // embeds when ConnectionType is relay, just without the dst_peer half.
-func (s *RouteService) GetRelayEndpoint(ctx context.Context) (*protocol.RelayEndpoint, error) {
+func (s *RouteService) GetRelayEndpoint(ctx context.Context, callerNodeID string) (*protocol.RelayEndpoint, error) {
 	relay, err := s.relays.GetBestAvailable(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("no relay available: %w", err)
 	}
-	return &protocol.RelayEndpoint{
-		Address:          relay.Address,
-		VLESSPort:        relay.VLESSPort,
-		VLESSUUID:        relay.VLESSUUID,
-		RealityPublicKey: relay.RealityPublicKey,
-		RealitySNI:       relay.RealitySNI,
-		RealityShortID:   firstShortID(relay.RealityShortIDs),
-	}, nil
+	return s.buildRelayEndpoint(relay, s.pubkeyOfNode(ctx, callerNodeID)), nil
 }
 
 // firstShortID picks the first entry from a CSV list (the form in which the

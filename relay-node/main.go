@@ -42,10 +42,13 @@ func main() {
 		}
 	}()
 
-	// Mesh dispatcher: terminates the VLESS streams bridged here by xray
-	// and performs pubkey-keyed forwarding between peers. Runs on loopback
-	// — xray routing rules pin VLESS clients to this destination only.
-	dispatcher := mesh.New(cfg.MeshDispatchAddr, logger)
+	// Mesh dispatcher: pubkey-keyed forwarding of WG ciphertext between peers
+	// (never decrypts). Binds MeshListenAddr (":9999" = public) so clients can
+	// reach it directly through their exit-node, skipping the relay-side VLESS
+	// hop; the legacy xray-bridged loopback path lands on the same listener.
+	// Direct connections must present a mesh-token (MeshAuthKey); loopback ones
+	// are already UUID-gated by xray and skip it.
+	dispatcher := mesh.New(cfg.MeshListenAddr, []byte(cfg.MeshAuthKey), logger)
 	go func() {
 		if err := dispatcher.ListenAndServe(ctx); err != nil {
 			logger.Fatal("mesh dispatcher failed", zap.Error(err))

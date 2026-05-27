@@ -22,6 +22,15 @@ type Config struct {
 	// Mesh network
 	MeshCIDR      string // e.g. "10.100.0.0/16"
 
+	// MeshAuthKey is the shared HMAC secret used to mint mesh-tokens that
+	// authenticate a client's direct connection to a relay's public dispatcher.
+	// Must match the relays' MESH_AUTH_KEY. Empty disables token minting
+	// (dogfood: relays then also accept tokenless direct connections).
+	MeshAuthKey string
+	// MeshDispatchPort is the public port relays expose their mesh dispatcher
+	// on; advertised to clients in the relay endpoint. Default 9999.
+	MeshDispatchPort int
+
 	// STUN
 	STUNAddr    string
 	STUNAltAddr string
@@ -65,6 +74,8 @@ func Load() *Config {
 		JWTSecret:               getEnv("JWT_SECRET", "change-me-in-production"),
 		TokenExpiry:             getDurationEnv("TOKEN_EXPIRY", 24*time.Hour),
 		MeshCIDR:                getEnv("MESH_CIDR", "10.100.0.0/16"),
+		MeshAuthKey:             getEnv("MESH_AUTH_KEY", ""),
+		MeshDispatchPort:        getIntEnv("MESH_DISPATCH_PORT", 9999),
 		STUNAddr:                getEnv("STUN_ADDR", ":3478"),
 		STUNAltAddr:             getEnv("STUN_ALT_ADDR", ":3479"),
 		RouteRecalcInterval:       getDurationEnv("ROUTE_RECALC_INTERVAL", 30*time.Second),
@@ -83,6 +94,15 @@ func Load() *Config {
 func getEnv(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
+	}
+	return fallback
+}
+
+func getIntEnv(key string, fallback int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
 	}
 	return fallback
 }
