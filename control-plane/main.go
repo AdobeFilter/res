@@ -78,7 +78,7 @@ func main() {
 	nodeHandler := handler.NewNodeHandler(nodeService, nodeRepo, broker, logger)
 	routeHandler := handler.NewRouteHandler(routeService, stunRepo, logger)
 	settingsHandler := handler.NewSettingsHandler(settingsRepo, nodeRepo, broker, logger)
-	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, cfg.AllowedRelaysFile, logger)
+	internalHandler := handler.NewInternalHandler(stunRepo, relayRepo, cfg.AllowedRelaysFile, cfg.MeshAuthKey, logger)
 	sshProxyHandler := handler.NewSSHProxyHandler(logger)
 	connLogHandler := handler.NewConnectionLogHandler("/var/log/valhalla", logger)
 	deviceHandler := handler.NewDeviceHandler(nodeRepo, accountRepo, rwClient, logger)

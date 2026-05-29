@@ -286,13 +286,19 @@ type InternalHandler struct {
 	stunRepo          db.STUNServerRepository
 	relayRepo         db.RelayServerRepository
 	relayAllowlistPath string
-	logger            *zap.Logger
+	// meshAuthKey is the shared HMAC secret handed to every registering relay
+	// in the response so the relay can verify mesh-tokens locally. Empty when
+	// the operator hasn't configured one — relays then run in dogfood mode
+	// (no token enforcement).
+	meshAuthKey string
+	logger      *zap.Logger
 }
 
-func NewInternalHandler(stunRepo db.STUNServerRepository, relayRepo db.RelayServerRepository, relayAllowlistPath string, logger *zap.Logger) *InternalHandler {
+func NewInternalHandler(stunRepo db.STUNServerRepository, relayRepo db.RelayServerRepository, relayAllowlistPath, meshAuthKey string, logger *zap.Logger) *InternalHandler {
 	return &InternalHandler{
 		stunRepo:          stunRepo,
 		relayRepo:         relayRepo,
+		meshAuthKey:       meshAuthKey,
 		relayAllowlistPath: relayAllowlistPath,
 		logger:            logger,
 	}
@@ -369,6 +375,7 @@ func (h *InternalHandler) RegisterRelay(w http.ResponseWriter, r *http.Request) 
 		RealityPublicKey:  creds.RealityPublicKey,
 		RealityShortIDs:   creds.RealityShortIDs,
 		RealitySNI:        creds.RealitySNI,
+		MeshAuthKey:       h.meshAuthKey,
 	})
 }
 

@@ -58,14 +58,20 @@ type RelayRegisterRequest struct {
 	Capacity  int    `json:"capacity"`
 }
 
-// RelayRegisterResponse carries the Reality credentials back to the relay
-// on first registration. The relay uses these to build xray's config. If the
-// relay was already registered, the same credentials are returned — rotating
-// them would break every client that cached the public key.
+// RelayRegisterResponse carries credentials back to the relay on registration.
+// VLESS/Reality fields are kept for backwards compatibility with relays that
+// still run an xray subprocess; modern WG-only relays ignore them.
+//
+// MeshAuthKey is the shared HMAC secret the relay uses to verify mesh-tokens
+// minted by the control-plane. Lives on the control-plane (one env var, one
+// trust anchor); relays receive it on every register response — no operator
+// input required on the relay side. Empty when the control-plane has no key
+// configured (dogfood: relays then accept connections without tokens).
 type RelayRegisterResponse struct {
 	VLESSUUID          string `json:"vless_uuid"`
 	RealityPrivateKey  string `json:"reality_private_key"`
 	RealityPublicKey   string `json:"reality_public_key"`
 	RealityShortIDs    string `json:"reality_short_ids"`
 	RealitySNI         string `json:"reality_sni"`
+	MeshAuthKey        string `json:"mesh_auth_key,omitempty"`
 }

@@ -30,10 +30,16 @@ const maxSessionsPerPubkey = 16
 // outbound — there is no relay-side VLESS. Because the port is open to the
 // internet, every HELLO must present a valid mesh-token (when authKey is
 // configured); the token is bound to the connecting pubkey.
+// KeyProvider returns the current shared HMAC secret used to verify
+// mesh-tokens. The dispatcher calls this on each HELLO so the key can be
+// refreshed at runtime (the registrar fetches it from the control-plane on
+// every register heartbeat). nil or empty disables token enforcement.
+type KeyProvider func() []byte
+
 type Dispatcher struct {
-	listenAddr string
-	authKey    []byte
-	logger     *zap.Logger
+	listenAddr  string
+	keyProvider KeyProvider
+	logger      *zap.Logger
 
 	mu       sync.RWMutex
 	sessions map[[PubkeyLen]byte][]*session
@@ -48,15 +54,16 @@ type session struct {
 	writeMu sync.Mutex
 }
 
-// New builds a dispatcher. authKey is the shared HMAC secret used to verify
-// mesh-tokens on direct connections; an empty key disables token enforcement
-// (dogfood mode — anyone reaching the port may register a pubkey).
-func New(listenAddr string, authKey []byte, logger *zap.Logger) *Dispatcher {
+// New builds a dispatcher. keyProvider is called on every HELLO to read the
+// current mesh-auth HMAC secret (delivered by the control-plane via the relay's
+// registration round-trip). nil or a function returning empty disables token
+// enforcement — dogfood mode, anyone reaching the port may register a pubkey.
+func New(listenAddr string, keyProvider KeyProvider, logger *zap.Logger) *Dispatcher {
 	return &Dispatcher{
-		listenAddr: listenAddr,
-		authKey:    authKey,
-		logger:     logger,
-		sessions:   make(map[[PubkeyLen]byte][]*session),
+		listenAddr:  listenAddr,
+		keyProvider: keyProvider,
+		logger:      logger,
+		sessions:    make(map[[PubkeyLen]byte][]*session),
 	}
 }
 
@@ -75,13 +82,12 @@ func (d *Dispatcher) ListenAndServe(ctx context.Context) error {
 		ln.Close()
 	}()
 
-	enforced := len(d.authKey) > 0
+	// Token enforcement is dynamic: the key arrives from control-plane via the
+	// registrar, so log only that fact here; the per-HELLO log line reveals
+	// whether a given connection was enforced or accepted bare.
 	d.logger.Info("mesh dispatcher listening",
 		zap.String("addr", d.listenAddr),
-		zap.Bool("token_auth", enforced))
-	if !enforced {
-		d.logger.Warn("MESH_AUTH_KEY unset: direct connections accepted without a token — set it before exposing the relay publicly")
-	}
+		zap.String("token_auth", "dynamic (set by control-plane MESH_AUTH_KEY)"))
 
 	for {
 		conn, err := ln.Accept()
@@ -163,9 +169,10 @@ func (d *Dispatcher) handleConn(ctx context.Context, conn net.Conn) {
 }
 
 // authenticate validates a HELLO payload and returns the client pubkey. When
-// authKey is empty (dogfood) the bare 32-byte pubkey is accepted; otherwise the
-// payload must carry a mesh-token — [pubkey(32) || expiry(8, big-endian unix)
-// || hmac(32)] — verified against authKey.
+// the current key (from keyProvider) is empty the bare 32-byte pubkey is
+// accepted — dogfood mode; otherwise the payload must carry a mesh-token —
+// [pubkey(32) || expiry(8, big-endian unix) || hmac(32)] — verified against
+// that key.
 func (d *Dispatcher) authenticate(payload []byte) ([PubkeyLen]byte, error) {
 	var pk [PubkeyLen]byte
 	if len(payload) < PubkeyLen {
@@ -173,10 +180,14 @@ func (d *Dispatcher) authenticate(payload []byte) ([PubkeyLen]byte, error) {
 	}
 	copy(pk[:], payload[:PubkeyLen])
 
-	if len(d.authKey) == 0 {
+	var key []byte
+	if d.keyProvider != nil {
+		key = d.keyProvider()
+	}
+	if len(key) == 0 {
 		return pk, nil
 	}
-	return verifyMeshToken(d.authKey, payload, time.Now())
+	return verifyMeshToken(key, payload, time.Now())
 }
 
 // verifyMeshToken checks a HELLO payload of the form

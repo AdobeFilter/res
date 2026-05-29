@@ -89,14 +89,15 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     read -p "Mesh dispatcher listen port [9999]: " MESH_PORT
     MESH_PORT=${MESH_PORT:-9999}
 
-    read -p "Mesh auth key (shared with control-plane; empty = no token enforcement): " MESH_AUTH_KEY
+    # No mesh-auth key prompt: the secret lives on the control-plane (its
+    # MESH_AUTH_KEY env) and arrives here automatically in the register
+    # response. Enforcement turns on as soon as CP has the env set.
 
     umask 077
     cat > "${ENV_FILE}" <<ENV
 LISTEN_ADDR=:51821
 TCP_LISTEN_ADDR=:51822
 MESH_LISTEN_ADDR=:${MESH_PORT}
-MESH_AUTH_KEY=${MESH_AUTH_KEY}
 CONTROL_PLANE_URL=${CONTROL_PLANE_URL}
 PUBLIC_ADDRESS=${PUBLIC_IP}
 CAPACITY=${CAPACITY}

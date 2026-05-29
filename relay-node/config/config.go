@@ -12,7 +12,8 @@ type Config struct {
 	Capacity        int    // max concurrent relay sessions
 	PublicAddress   string // public IP for registration
 	MeshListenAddr  string // addr the mesh dispatcher binds; ":9999" exposes it publicly so clients reach it directly through their exit-node
-	MeshAuthKey     string // shared HMAC secret for mesh-token auth; empty disables token enforcement (dogfood)
+	// Mesh auth key is NOT a relay config — it arrives from the control-plane
+	// in the register response (one secret, one place: CP's MESH_AUTH_KEY env).
 }
 
 func Load() *Config {
@@ -23,7 +24,6 @@ func Load() *Config {
 		Capacity:        getIntEnv("CAPACITY", 1000),
 		PublicAddress:   getEnv("PUBLIC_ADDRESS", ""),
 		MeshListenAddr:  getEnv("MESH_LISTEN_ADDR", ":9999"),
-		MeshAuthKey:     getEnv("MESH_AUTH_KEY", ""),
 	}
 }
 
